@@ -1,0 +1,151 @@
+# ====================
+# Environment Files
+# ====================
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ====================
+# Python
+# ====================
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+bdist.*/
+*.so
+.eggs/
+python_env/
+pyenv/
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# ====================
+# Python Compiled/Generated
+# ====================
+*.so
+*.pyd
+*.pyo
+
+# ====================
+# Node.js / Frontend
+# ====================
+node_modules/
+frontend/dist/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ====================
+# Docker
+# ====================
+.docker/
+docker-compose.override.yml
+
+# ====================
+# IDE
+# ====================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.ipynb_checkpoints/
+.replit
+.secrets
+
+# ====================
+# Jupyter Notebooks
+# ====================
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# ====================
+# OS
+# ====================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ====================
+# Logs
+# ====================
+*.log
+logs/
+*.log.*
+
+# ====================
+# Database
+# ====================
+*.sql.gz
+*.dump
+*.bak
+*.sqlite3
+*.db
+*.db-journal
+
+# ====================
+# Secrets & Credentials (never commit)
+# ====================
+*.pem
+*.key
+*.crt
+id_rsa
+id_ed25519
+*.p12
+*.pfx
+
+# ====================
+# Coverage / Testing
+# ====================
+coverage/
+htmlcov/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+
+# ====================
+# Type Check / Lint Cache
+# ====================
+.mypy_cache/
+.ruff_cache/
+.eslintcache
+.eslintignore
+
+# ====================
+# VSCode
+# ====================
+.vscode/settings.json
+.vscode/*.json.*
+
+# ====================
+# Miscellaneous
+# ====================
+*.orig
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
