@@ -4,11 +4,14 @@ Handles AES-256 decryption of stored embeddings before cosine similarity search.
 """
 
 import hashlib
+from datetime import datetime
 from typing import Optional
 
+import numpy as np
 from sqlalchemy import text
 
 from app.core.config import settings
+from app.core.crypto import decrypt_embedding_bytes, encrypt_embedding_vector
 
 
 def compute_query_hash(embedding_bytes: bytes) -> str:
@@ -18,7 +21,7 @@ def compute_query_hash(embedding_bytes: bytes) -> str:
 
 async def cosine_ann_query(
     session,
-    query_vector: list[float],
+    query_vector: list[float] | bytes,
     threshold: Optional[float] = None,
     limit: int = 10,
 ) -> list[dict]:
@@ -35,6 +38,9 @@ async def cosine_ann_query(
     threshold defaults to MATCH_THRESHOLD from config.
     """
     threshold = threshold if threshold is not None else settings.match_threshold
+
+    if isinstance(query_vector, (bytes, bytearray)):
+        query_vector = decrypt_embedding_bytes(bytes(query_vector)).tolist()
 
     # Build vector literal from list for pgvector
     vec_str = f"[{','.join(f'{v:.10f}' for v in query_vector)}]"
@@ -77,26 +83,37 @@ async def register_profile(
     suspect_name: str,
     alias: Optional[str],
     demographics: Optional[dict],
-    embedding_bytes: bytes,
+    embedding: np.ndarray | list[float],
 ) -> int:
     """
     Insert a new suspect profile.
-    In production, embedding_bytes would be AES-256 encrypted before storage.
-    For now we store the raw bytes as hex (development only).
+    Embeddings are stored as pgvector plus AES-256 encrypted payload at rest.
     """
-    from app.db.models import SuspectProfile
+    vector = np.asarray(embedding, dtype=np.float32)
+    vec_str = f"[{','.join(f'{v:.10f}' for v in vector.tolist())}]"
+    encrypted = encrypt_embedding_vector(vector)
 
-    profile = SuspectProfile(
-        suspect_name=suspect_name,
-        alias=alias,
-        demographics=demographics,
-        face_embedding=embedding_bytes.hex(),
-        embedding_dim=512,
+    sql = text(
+        """
+        INSERT INTO suspect_profiles (suspect_name, alias, demographics, face_embedding, face_embedding_enc)
+        VALUES (:suspect_name, :alias, :demographics, :vec::vector, :enc)
+        RETURNING id
+        """
     )
-    session.add(profile)
+
+    result = await session.execute(
+        sql,
+        {
+            "suspect_name": suspect_name,
+            "alias": alias,
+            "demographics": demographics,
+            "vec": vec_str,
+            "enc": encrypted,
+        },
+    )
+
     await session.commit()
-    await session.refresh(profile)
-    return profile.id
+    return int(result.scalar_one())
 
 
 async def add_audit_entry(

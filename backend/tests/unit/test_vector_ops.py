@@ -226,6 +226,23 @@ class TestCosineANNQuery:
         params = call_args[0][1] if call_args[0] else call_args[1]
         assert params["limit"] == 25
 
+    @pytest.mark.asyncio
+    async def test_decrypts_encrypted_query_vector(self):
+        mock_session = AsyncMock()
+
+        class MockResult:
+            def __iter__(self):
+                return iter([])
+
+        mock_session.execute = AsyncMock(return_value=MockResult())
+
+        with patch("app.db.vector_ops.decrypt_embedding_bytes") as mock_decrypt:
+            mock_decrypt.return_value = np.zeros(512, dtype=np.float32)
+            from app.db.vector_ops import cosine_ann_query
+
+            await cosine_ann_query(mock_session, b"encrypted")
+            mock_decrypt.assert_called_once()
+
 
 class TestThresholdLogic:
     """Test that matches are filtered by threshold."""
@@ -250,61 +267,45 @@ class TestRegisterAndAudit:
 
     @pytest.mark.asyncio
     async def test_register_profile_inserts_record(self):
-        """Verify register_profile calls session.add + commit."""
+        """Verify register_profile calls session.execute + commit."""
         mock_session = AsyncMock()
-        mock_session.add = MagicMock()
         mock_session.commit = AsyncMock()
 
-        class FakeProfile:
-            def __init__(self, **kwargs):
-                self.__dict__.update(kwargs)
+        class MockResult:
+            def scalar_one(self):
+                return 1
+
+        mock_session.execute = AsyncMock(return_value=MockResult())
 
         import app.db.vector_ops as vector_ops
-        vector_ops.SuspectProfile = FakeProfile
+        emb = np.random.randn(512).astype(np.float32)
 
-        await vector_ops.register_profile(
-            mock_session, "Test", None, None, b"test_bytes"
-        )
+        await vector_ops.register_profile(mock_session, "Test", None, None, emb)
 
         mock_session.commit.assert_awaited_once()
-        mock_session.add.assert_called_once()
+        mock_session.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_register_profile_writes_face_embedding_column(self):
-        """register_profile should write to face_embedding field (not face_embedding_bytes)."""
-        captured_profile = None
+        """register_profile should write both vector and encrypted payload parameters."""
+        mock_session = AsyncMock()
+        mock_session.commit = AsyncMock()
 
-        class FakeProfile:
-            def __init__(self, **kwargs):
-                nonlocal captured_profile
-                self.id = 999
-                self.__dict__.update(kwargs)
-                captured_profile = kwargs
+        class MockResult:
+            def scalar_one(self):
+                return 1
 
-        # Patch the models module so register_profile's import gets our fake
-        import app.db.models as models_module
-        original = models_module.SuspectProfile
-        models_module.SuspectProfile = FakeProfile
+        mock_session.execute = AsyncMock(return_value=MockResult())
 
-        try:
-            from app.db import vector_ops
+        from app.db import vector_ops
 
-            mock_session = AsyncMock()
-            mock_session.add = MagicMock()
-            mock_session.commit = AsyncMock()
-            mock_session.refresh = AsyncMock()
+        emb = np.random.randn(512).astype(np.float32)
+        await vector_ops.register_profile(mock_session, "Test", None, None, emb)
 
-            await vector_ops.register_profile(
-                mock_session,
-                "Test", None, None, b"\x01\x02\x03\x04" * 8  # 32 bytes → 64 hex chars
-            )
-
-            assert captured_profile["face_embedding"] is not None
-            # Should be hex-encoded bytes
-            assert isinstance(captured_profile["face_embedding"], str)
-            assert len(captured_profile["face_embedding"]) == 64  # 32 bytes → 64 hex chars
-        finally:
-            models_module.SuspectProfile = original
+        call_args = mock_session.execute.call_args
+        params = call_args[0][1] if call_args[0] else call_args[1]
+        assert "vec" in params
+        assert "enc" in params
 
     @pytest.mark.asyncio
     async def test_audit_entry_insert_only(self):

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 interface CameraFeedProps {
-  onFrameCaptured?: (blob: Blob) => void;
+  onFrameCaptured?: (blob: Blob, gpsLat?: number | null, gpsLon?: number | null) => void;
   isSearching?: boolean;
 }
 
@@ -35,7 +35,20 @@ export default function CameraFeed({ onFrameCaptured, isSearching }: CameraFeedP
     setStreamActive(false);
   }, []);
 
-  const captureFrame = useCallback(() => {
+  const getGps = useCallback(() => new Promise<{ lat: number | null; lon: number | null }>((resolve) => {
+    if (!navigator.geolocation) {
+      resolve({ lat: null, lon: null });
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => resolve({ lat: null, lon: null }),
+      { enableHighAccuracy: false, timeout: 3000, maximumAge: 60000 }
+    );
+  }), []);
+
+  const captureFrame = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current) return;
 
     const video = videoRef.current;
@@ -47,12 +60,15 @@ export default function CameraFeed({ onFrameCaptured, isSearching }: CameraFeedP
     if (!ctx) return;
 
     ctx.drawImage(video, 0, 0);
-    canvas.toBlob((blob) => {
-      if (blob && onFrameCaptured) {
-        onFrameCaptured(blob);
-      }
-    }, 'image/jpeg');
-  }, [onFrameCaptured]);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg')
+    );
+
+    if (!blob || !onFrameCaptured) return;
+
+    const gps = await getGps();
+    onFrameCaptured(blob, gps.lat, gps.lon);
+  }, [getGps, onFrameCaptured]);
 
   useEffect(() => {
     return () => {
@@ -109,7 +125,7 @@ export default function CameraFeed({ onFrameCaptured, isSearching }: CameraFeedP
               ⏹ Stop Camera
             </button>
             <button className="btn" style={{ background: '#38bdf8', color: '#0f172a', padding: '0.5rem 1.5rem' }}
-                    onClick={captureFrame}
+                  onClick={() => void captureFrame()}
                     disabled={isSearching}>
               📸 Capture & Search
             </button>

@@ -78,15 +78,44 @@ function AppContent(): JSX.Element {
     }
   }, [isAuthenticated, user]);
 
-  const handleFrameCaptured = useCallback(async (blob: Blob) => {
+  const playAlertSound = useCallback(() => {
+    try {
+      const AudioContext = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContext) return;
+      const ctx = new AudioContext();
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      oscillator.type = 'sine';
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.05;
+
+      oscillator.connect(gain);
+      gain.connect(ctx.destination);
+      oscillator.start();
+      oscillator.stop(ctx.currentTime + 0.25);
+      oscillator.onended = () => {
+        void ctx.close();
+      };
+    } catch {
+      // Ignore audio failures (browser permissions, unsupported API)
+    }
+  }, []);
+
+  const handleFrameCaptured = useCallback(async (blob: Blob, gpsLat?: number | null, gpsLon?: number | null) => {
     setIsSearching(true);
     try {
       const formData = new FormData();
       formData.append('file', blob, 'capture.jpg');
+      if (gpsLat !== undefined && gpsLat !== null && gpsLon !== undefined && gpsLon !== null) {
+        formData.append('gps_lat', gpsLat.toString());
+        formData.append('gps_lon', gpsLon.toString());
+      }
 
       const response = await searchFace(formData);
 
       if (response.status === 'MATCH') {
+        playAlertSound();
         await refresh();
       }
     } catch (err) {
@@ -94,7 +123,7 @@ function AppContent(): JSX.Element {
     } finally {
       setIsSearching(false);
     }
-  }, [refresh]);
+  }, [playAlertSound, refresh]);
 
   const handleLogout = useCallback(() => {
     logout();

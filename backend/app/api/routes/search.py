@@ -5,15 +5,16 @@ Search endpoint — upload query image → run pipeline → return match or NO_M
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.pipeline import run_pipeline
 from app.core.config import settings
 from app.db.session import get_session
-from app.db.vector_ops import add_audit_entry, compute_query_hash
-from app.schemas.face import MatchResult, SearchRequest, SearchResponse
+from app.core.validation import validate_image_dimensions
+from app.db.vector_ops import add_audit_entry, compute_query_hash, create_alert
+from app.schemas.face import MatchResult, SearchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,8 @@ router = APIRouter(prefix="/api/v1", tags=["search"])
 @router.post("/search", response_model=SearchResponse)
 async def search_face(
     file: UploadFile = File(..., description="Face image to search (JPEG/PNG, ≤ 5 MB)"),
-    search_data: Optional[SearchRequest] = None,
+    gps_lat: Optional[float] = Form(None, ge=-90, le=90, description="GPS latitude of capture"),
+    gps_lon: Optional[float] = Form(None, ge=-180, le=180, description="GPS longitude of capture"),
     limit: int = Query(10, ge=1, le=50, description="Max matches to return"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
@@ -42,13 +44,15 @@ async def search_face(
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image must be ≤ 5 MB")
 
+    try:
+        validate_image_dimensions(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # Rewind file so run_pipeline can read it
     file.file.seek(0)
 
-    gps_lat = search_data.gps_lat if search_data else None
-    gps_lon = search_data.gps_lon if search_data else None
-
-    result = await run_pipeline(file, session, gps_lat, gps_lon)
+    result = await run_pipeline(file, session, gps_lat, gps_lon, limit=limit)
 
     # Log to audit trail
     query_hash = result.get("query_hash", compute_query_hash(b""))
@@ -58,15 +62,31 @@ async def search_face(
     if result["status"] == "MATCH" and result.get("matches"):
         result_name = result["matches"][0]["suspect_name"]
 
-    await add_audit_entry(
-        session,
-        event_type=event_type,
-        query_hash=query_hash,
-        result_name=result_name,
-        distance=result["matches"][0]["distance"] if result["matches"] else None,
-        gps_lat=gps_lat,
-        gps_lon=gps_lon,
-    )
+    alert_id = None
+    audit_id = None
+
+    if event_type != "SPOOF_BLOCKED":
+        audit_id = await add_audit_entry(
+            session,
+            event_type=event_type,
+            query_hash=query_hash,
+            result_name=result_name,
+            distance=result["matches"][0]["distance"] if result["matches"] else None,
+            gps_lat=gps_lat,
+            gps_lon=gps_lon,
+        )
+
+    if event_type == "MATCH" and audit_id is not None:
+        best_match = result["matches"][0] if result.get("matches") else None
+        alert_id = await create_alert(
+            session,
+            audit_log_id=audit_id,
+            suspect_id=best_match.get("id") if best_match else None,
+            event_type="MATCH",
+            distance=best_match.get("distance") if best_match else None,
+            gps_lat=gps_lat,
+            gps_lon=gps_lon,
+        )
 
     matches = [
         MatchResult(
@@ -84,4 +104,6 @@ async def search_face(
         matches=matches,
         gps_lat=gps_lat,
         gps_lon=gps_lon,
+        match_threshold=settings.match_threshold,
+        alert_id=alert_id,
     )

@@ -4,11 +4,9 @@ SQLAlchemy ORM models.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Numeric
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, LargeBinary
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
-
-import asyncpg
 
 
 class Base(DeclarativeBase):
@@ -22,10 +20,9 @@ class SuspectProfile(Base):
     suspect_name = Column(String(100), nullable=False)
     alias = Column(String(100), nullable=True)
     demographics = Column(JSONB, nullable=True)
-    # Stored as hex text for dev; production would AES-256 encrypt before storing here.
-    # The DB column is vector(512) as defined in init.sql.
+    # Stored as pgvector vector(512) in DB; encrypted payload stored separately.
     face_embedding = Column(Text, nullable=False)
-    embedding_dim = Column(Integer, default=512)
+    face_embedding_enc = Column(LargeBinary, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     alerts = relationship("Alert", back_populates="suspect")

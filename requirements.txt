@@ -1,0 +1,48 @@
+# ============================================================================
+# fetch_wanted_criminals.py — Dependencies
+# ============================================================================
+#
+# INSTALLATION INSTRUCTIONS
+# -------------------------
+#
+# Prerequisites:
+#   - Python 3.8 or higher
+#   - pip (Python package installer)
+#
+# Step 1: Create a virtual environment (recommended)
+# ---------------------------------------------------
+#   python -m venv venv
+#
+#   On Windows:
+#       venv\Scripts\activate
+#
+#   On macOS/Linux:
+#       source venv/bin/activate
+#
+# Step 2: Install dependencies
+# -----------------------------
+#   pip install -r requirements.txt
+#
+#   Or install manually:
+#       pip install requests beautifulsoup4
+#
+# Step 3: Run the script
+# -----------------------
+#   python fetch_wanted_criminals.py
+#
+# The script will create a `testdata` directory and save images and
+# description files for each criminal in the list.
+#
+# ============================================================================
+
+# HTTP client library for fetching webpages and images.
+# Handles connections, timeouts, streaming downloads, and session management.
+requests>=2.31.0
+
+# HTML/XML parsing library for extracting image URLs from webpages.
+# Provides a simple API for navigating and searching the DOM tree.
+beautifulsoup4>=4.12.0
+
+# Optional: HTML parser backend (usually included with BeautifulSoup).
+# Install if you encounter parser-related warnings.
+# html5lib>=1.1

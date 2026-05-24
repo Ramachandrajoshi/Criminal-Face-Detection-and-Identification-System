@@ -172,17 +172,25 @@ export default function Dashboard(props: DashboardProps): JSX.Element {
             Query Hash: {searchResult.queryHash.slice(0, 16)}…
           </div>
           {searchResult.status === 'MATCH' && searchResult.matches.length > 0 && (
+            (() => {
+              const thresholdLabel =
+                searchResult.matchThreshold !== undefined && searchResult.matchThreshold !== null
+                  ? searchResult.matchThreshold.toFixed(2)
+                  : 'n/a';
+              return (
             <div className="match-list" style={{ marginTop: '0.75rem' }}>
               {searchResult.matches.map((m) => (
                 <div key={m.id} className="match-item">
                   <div className="match-name">{m.suspectName}</div>
                   {m.alias && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{m.alias}</div>}
                   <div className="match-distance">
-                    Distance: {m.distance.toFixed(4)} (threshold: 0.58)
+                    Distance: {m.distance.toFixed(4)} (threshold: {thresholdLabel})
                   </div>
                 </div>
               ))}
             </div>
+              );
+            })()
           )}
           {searchResult.status === 'MATCH' && (
             <div style={{

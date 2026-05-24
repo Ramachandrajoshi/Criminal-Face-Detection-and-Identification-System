@@ -56,6 +56,8 @@ class SearchResponse(_BaseCamel):
     matches: list[MatchResult] = []
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
+    match_threshold: Optional[float] = None
+    alert_id: Optional[int] = None
 
 
 class RegisterResponse(_BaseCamel):

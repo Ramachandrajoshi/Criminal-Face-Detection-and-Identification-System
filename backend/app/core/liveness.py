@@ -7,54 +7,17 @@ In production, this should be expanded with dedicated liveness checks
 """
 
 import logging
-from typing import Optional
-
 import numpy as np
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 def check_liveness(image_bytes: bytes) -> bool:
-    """
-    Perform a basic liveness check on the uploaded image.
-
-    Returns True if the image passes liveness (real person),
-    False if a spoof (photo, video, mask) is detected.
-
-    This is a placeholder — production should integrate a
-    dedicated anti-spoofing model.
-    """
-    try:
-        import cv2
-        from deepface import DeepFace
-
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if frame is None:
-            return False
-
-        # DeepFace's extract_faces has anti_spoofing parameter
-        from deepface import DeepFace
-
-        # Use a simple heuristic: check if the face is detected
-        # In production, use a dedicated liveness model
-        result = DeepFace.extract_faces(
-            img_path=frame,
-            detector_backend="retinaface",
-            enforce_detection=False,
-            align=True,
-        )
-
-        if not result:
-            return False
-
-        # Placeholder: assume real if face detected
-        # TODO: Integrate a dedicated liveness model
-        return True
-
-    except Exception as exc:
-        logger.error("Liveness check error: %s", exc)
-        return False
+    """Return True if the image passes anti-spoofing checks."""
+    result = check_liveness_with_deepface(image_bytes)
+    return result.get("is_live", False)
 
 
 def check_liveness_with_deepface(image_bytes: bytes) -> dict:
@@ -75,24 +38,50 @@ def check_liveness_with_deepface(image_bytes: bytes) -> dict:
 
         from deepface import DeepFace
 
-        result = DeepFace.extract_faces(
-            img_path=frame,
-            detector_backend="retinaface",
-            enforce_detection=False,
-            align=True,
+        verify_result = DeepFace.verify(
+            img1_path=frame,
+            img2_path=frame,
+            model_name=settings.deepface_model,
+            detector_backend=settings.deepface_detector,
+            distance_metric="cosine",
+            enforce_detection=True,
             anti_spoofing=True,
         )
 
-        if not result:
-            return {"is_live": False, "spoof_probability": 1.0}
+        is_real = verify_result.get("is_real")
+        real_score = verify_result.get("real_score")
 
-        # DeepFace may return is_real in the result
-        face = result[0]
-        is_real = face.get("is_real", True)
-        spoof_prob = 1.0 - face.get("real_score", 1.0)
+        verified_flag = verify_result.get("verified")
+
+        if is_real is None and real_score is None and verified_flag is not None:
+            is_real = bool(verified_flag)
+            real_score = 1.0 if is_real else 0.0
+
+        if is_real is None and real_score is None:
+            faces = DeepFace.extract_faces(
+                img_path=frame,
+                detector_backend=settings.deepface_detector,
+                enforce_detection=True,
+                align=True,
+                anti_spoofing=True,
+            )
+            if not faces:
+                return {"is_live": False, "spoof_probability": 1.0}
+
+            face = faces[0]
+            is_real = face.get("is_real", True)
+            real_score = face.get("real_score", 1.0)
+
+        if is_real is None:
+            is_real = bool(verify_result.get("verified", False))
+
+        if real_score is None:
+            real_score = 1.0 if is_real else 0.0
+
+        spoof_prob = 1.0 - float(real_score) if is_real else 1.0
 
         return {
-            "is_live": is_real,
+            "is_live": bool(is_real),
             "spoof_probability": float(spoof_prob),
         }
 
