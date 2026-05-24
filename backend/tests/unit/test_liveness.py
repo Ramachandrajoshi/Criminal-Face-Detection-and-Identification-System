@@ -176,7 +176,7 @@ class TestSpoofBlockedPath:
             assert result["is_live"] is False
 
     def test_pipeline_calls_liveness_on_search(self):
-        """run_pipeline should call liveness check before processing."""
+        """run_pipeline should call liveness check only when enforce_liveness=True."""
         liveness_called = []
 
         def liveness_side_effect(data):
@@ -195,13 +195,18 @@ class TestSpoofBlockedPath:
                 file=io.BytesIO(make_test_image()),
             )
 
-            # Use asyncio.run to properly run the coroutine
-            asyncio.run(run_pipeline(file, AsyncMock()))
-
+            # 1. When enforce_liveness is True
+            asyncio.run(run_pipeline(file, AsyncMock(), enforce_liveness=True))
             assert len(liveness_called) == 1
 
+            # 2. When enforce_liveness is False (default)
+            liveness_called.clear()
+            file.file.seek(0)
+            asyncio.run(run_pipeline(file, AsyncMock(), enforce_liveness=False))
+            assert len(liveness_called) == 0
+
     def test_pipeline_calls_liveness_on_register(self):
-        """register_pipeline should call liveness check before processing."""
+        """register_pipeline should never call liveness check."""
         liveness_called = []
 
         def liveness_side_effect(data):
@@ -222,5 +227,5 @@ class TestSpoofBlockedPath:
 
             asyncio.run(register_pipeline(file, AsyncMock(), "Test"))
 
-            assert len(liveness_called) == 1
+            assert len(liveness_called) == 0
 

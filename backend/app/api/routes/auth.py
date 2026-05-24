@@ -81,7 +81,7 @@ async def refresh_token(
     """
     try:
         old_token = body.get("access_token", "")
-        payload = decode_access_token(old_token)
+        payload = decode_access_token(old_token, verify_exp=False)
     except HTTPException:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -112,7 +112,7 @@ function AppContent(): JSX.Element {
         formData.append('gps_lon', gpsLon.toString());
       }
 
-      const response = await searchFace(formData);
+      const response = await searchFace(formData, true);
 
       if (response.status === 'MATCH') {
         playAlertSound();

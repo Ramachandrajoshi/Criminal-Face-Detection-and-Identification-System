@@ -149,10 +149,18 @@ class TestRegisterPipeline:
             assert "Embedding extraction failed" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_register_spoof_blocked(self):
-        """Liveness check fails — should return SPOOF_BLOCKED."""
+    async def test_register_bypasses_liveness(self, mock_embedding):
+        """Even if check_liveness_on_bytes would return False, registration bypasses it and succeeds."""
+        mock_detect = MagicMock(return_value=np.zeros((112, 112, 3), dtype=np.uint8))
+        mock_extract = MagicMock(return_value=mock_embedding)
+        mock_register = AsyncMock(return_value=42)
+        mock_audit = AsyncMock(return_value=1)
+
         with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_false()), \
-             patch("app.db.vector_ops.add_audit_entry", AsyncMock(return_value=1)):
+             patch("app.core.pipeline.detect_face", mock_detect), \
+             patch("app.core.pipeline.extract_embedding", mock_extract), \
+             patch("app.db.vector_ops.register_profile", mock_register), \
+             patch("app.db.vector_ops.add_audit_entry", mock_audit):
 
             from app.core.pipeline import register_pipeline
             file = UploadFile(
@@ -161,32 +169,8 @@ class TestRegisterPipeline:
             )
             result = await register_pipeline(file, AsyncMock(), "Test Suspect")
 
-            assert result["status"] == "SPOOF_BLOCKED"
-            assert result["error"] == "Liveness check failed — possible spoof detected"
-
-    @pytest.mark.asyncio
-    async def test_register_spoof_logs_audit_entry(self):
-        """SPOOF_BLOCKED should call add_audit_entry with SPOOF_BLOCKED."""
-        audit_calls = []
-
-        async def capture_audit(*args, **kwargs):
-            audit_calls.append((args, kwargs))
-            return 1
-
-        with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_false()), \
-             patch("app.db.vector_ops.add_audit_entry", capture_audit):
-
-            from app.core.pipeline import register_pipeline
-            file = UploadFile(
-                filename="test.jpg",
-                file=io.BytesIO(make_test_image_bytes()),
-            )
-            result = await register_pipeline(file, AsyncMock(), "Test Suspect")
-
-            assert result["status"] == "SPOOF_BLOCKED"
-            assert len(audit_calls) == 1
-            # Check that the event type is SPOOF_BLOCKED
-            assert audit_calls[0][1].get("event_type") == "SPOOF_BLOCKED"
+            assert result["status"] == "REGISTERED"
+            assert result["profile_id"] == 42
 
     @pytest.mark.asyncio
     async def test_check_liveness_on_bytes_returns_bool(self):
@@ -320,7 +304,7 @@ class TestSearchPipeline:
                 filename="test.jpg",
                 file=io.BytesIO(make_test_image_bytes()),
             )
-            result = await run_pipeline(file, AsyncMock())
+            result = await run_pipeline(file, AsyncMock(), enforce_liveness=True)
 
             assert result["status"] == "SPOOF_BLOCKED"
             assert result["matches"] == []
@@ -343,7 +327,7 @@ class TestSearchPipeline:
                 filename="test.jpg",
                 file=io.BytesIO(make_test_image_bytes()),
             )
-            result = await run_pipeline(file, AsyncMock())
+            result = await run_pipeline(file, AsyncMock(), enforce_liveness=True)
 
             assert result["status"] == "SPOOF_BLOCKED"
             assert len(audit_calls) == 1
@@ -638,6 +622,27 @@ class TestAuthEndpoint:
         )
         token = login_resp.json()["access_token"]
         # Then refresh it
+        response = client.post(
+            "/api/v1/token/refresh",
+            json={"access_token": token},
+        )
+        data = response.json()
+        assert response.status_code == 200
+        assert "access_token" in data
+        assert data["token_type"] == "bearer"
+
+    def test_refresh_expired_token_success(self):
+        """Expired but signature-valid token should be refreshable."""
+        client = TestClient(
+            __import__("app.main", fromlist=["app"]).app, raise_server_exceptions=False
+        )
+        from datetime import timedelta
+        # Generate an expired token
+        token = create_access_token(
+            {"sub": "admin", "role": "admin"},
+            expires_delta=timedelta(seconds=-1)
+        )
+        # Refresh it
         response = client.post(
             "/api/v1/token/refresh",
             json={"access_token": token},

@@ -81,6 +81,16 @@ class TestDecodeAccessToken:
             decode_access_token(token)
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
 
+    def test_decode_expired_token_with_verify_exp_false(self):
+        """Token with expired expiry should decode successfully if verify_exp is False."""
+        token = create_access_token(
+            {"sub": "expired-refreshed", "role": "admin"},
+            expires_delta=timedelta(seconds=-1),
+        )
+        payload = decode_access_token(token, verify_exp=False)
+        assert payload["sub"] == "expired-refreshed"
+        assert payload["role"] == "admin"
+
 
 class TestAuthMiddleware:
     """Test AuthMiddleware — protected routes require JWT, health does not."""
