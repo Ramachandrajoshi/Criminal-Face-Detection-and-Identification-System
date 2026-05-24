@@ -81,7 +81,9 @@ Authorization: Bearer <token>
     { "id": 42, "suspectName": "John Doe", "alias": "JD", "distance": 0.32 }
   ],
   "gpsLat": 40.7128,
-  "gpsLon": -74.006
+  "gpsLon": -74.006,
+  "matchThreshold": 0.58,
+  "alertId": 101
 }
 ```
 
@@ -153,6 +155,8 @@ Content-Type: application/json
 GET /api/v1/audit?page=1&page_size=50&event_type=MATCH
 Authorization: Bearer <token>
 ```
+
+**Access:** admin only
 
 **Response:** `200 OK`
 ```json

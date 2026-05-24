@@ -215,7 +215,6 @@ export default function LoginPage() {
           </button>
         </form>
 
-        {/* Default credentials hint */}
         <div style={{
           marginTop: '1.5rem',
           padding: '1rem',
@@ -224,16 +223,9 @@ export default function LoginPage() {
           borderRadius: '6px',
           fontSize: '0.75rem',
           color: '#64748b',
+          textAlign: 'center',
         }}>
-          <div style={{ fontWeight: 600, color: '#38bdf8', marginBottom: '0.25rem' }}>
-            Default credentials:
-          </div>
-          <div>
-            Username: <code style={{ background: '#0f172a', padding: '0.125rem 0.375rem', borderRadius: '3px' }}>admin</code>
-          </div>
-          <div>
-            Password: <code style={{ background: '#0f172a', padding: '0.125rem 0.375rem', borderRadius: '3px' }}>admin123</code>
-          </div>
+          Credentials are provisioned by system administrators.
         </div>
       </div>
 

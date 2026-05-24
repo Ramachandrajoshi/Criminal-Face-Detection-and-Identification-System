@@ -6,6 +6,7 @@ import logging
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 
 from app.core.auth import create_access_token, decode_access_token
@@ -27,10 +28,7 @@ class TokenResponse(BaseModel):
     expires_in: int  # seconds
 
 
-# ── Hard-coded default admin account (override via env) ──────────
-
-DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_PASS = "admin123"  # override via JWT_SECRET in .env
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def _validate_credentials(username: str, password: str) -> bool:
@@ -38,10 +36,14 @@ def _validate_credentials(username: str, password: str) -> bool:
     Validate credentials.
     In production, replace with DB lookup against hashed passwords.
     """
-    if username == DEFAULT_ADMIN_USER and password == DEFAULT_ADMIN_PASS:
-        return True
-    # TODO: Replace with actual DB/user table lookup
-    return False
+    if not settings.admin_username or not settings.admin_password_hash:
+        logger.error("Admin credentials are not configured")
+        return False
+
+    if username != settings.admin_username:
+        return False
+
+    return pwd_context.verify(password, settings.admin_password_hash)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -49,7 +51,7 @@ async def login(request: LoginRequest):
     """
     Authenticate with username/password and receive a JWT access token.
 
-    - Default credentials: admin / admin123
+    - Admin credentials are configured via environment variables
     - Token expires after 8 hours (configurable via JWT_EXPIRY_HOURS)
     - All login attempts are logged for security auditing.
     """
@@ -103,13 +105,17 @@ async def refresh_token(
 async def init_admin_account():
     """
     Seed the default admin account.
-    Call once during initial setup.
-    In production, remove this endpoint.
+    Disabled unless ALLOW_ADMIN_INIT=true.
     """
+    if not settings.allow_admin_init:
+        raise HTTPException(status_code=403, detail="Admin init is disabled")
+
+    if not settings.admin_username:
+        raise HTTPException(status_code=400, detail="ADMIN_USERNAME is not configured")
+
     return {
-        "message": "Default admin account created",
-        "username": DEFAULT_ADMIN_USER,
-        "password": DEFAULT_ADMIN_PASS,
-        "warning": "CHANGE THIS PASSWORD IN PRODUCTION",
+        "message": "Admin init is enabled; configure ADMIN_PASSWORD_HASH",
+        "username": settings.admin_username,
+        "password_hash_hint": "bcrypt",
         "nonce": secrets.token_hex(8),
     }

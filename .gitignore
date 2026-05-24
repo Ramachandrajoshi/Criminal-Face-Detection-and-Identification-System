@@ -149,3 +149,5 @@ coverage.xml
 Thumbs.db
 *.tmp
 *.temp
+testdata/
+fetch_wanted_criminals.py

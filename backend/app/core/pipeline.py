@@ -60,8 +60,17 @@ def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
                 align=True,
             )
         except Exception as exc2:
-            logger.error("MTCNN fallback also failed: %s", exc2)
-            return None
+            logger.warning("MTCNN fallback failed: %s — trying opencv", exc2)
+            try:
+                faces = DeepFace.extract_faces(
+                    img_path=frame,
+                    detector_backend="opencv",
+                    enforce_detection=False,
+                    align=True,
+                )
+            except Exception as exc3:
+                logger.error("OpenCV fallback also failed: %s", exc3)
+                return None
 
     if not faces:
         logger.warning("No face detected in frame")
@@ -157,6 +166,7 @@ async def run_pipeline(
     gps_lat: Optional[float] = None,
     gps_lon: Optional[float] = None,
     suspect_name: Optional[str] = None,
+    limit: int = 10,
 ) -> dict:
     """
     Execute the full five-stage pipeline on an uploaded image.
@@ -166,8 +176,6 @@ async def run_pipeline(
       - matches: list of match dicts (empty for NO_MATCH)
       - query_hash: SHA-256 of the embedding
     """
-    import hashlib
-
     content = await file.read()
 
     # Anti-spoofing: check liveness before proceeding
@@ -176,7 +184,7 @@ async def run_pipeline(
     else:
         # Liveness check failed — block and log
         query_hash = compute_query_hash(b"")
-        await _add_spoof_audit(session, query_hash, content)
+        await _add_spoof_audit(session, query_hash, gps_lat=gps_lat, gps_lon=gps_lon)
         return {
             "status": "SPOOF_BLOCKED",
             "matches": [],
@@ -196,7 +204,7 @@ async def run_pipeline(
     query_hash = compute_query_hash(embedding.tobytes())
 
     # Stage 5: Verify — ANN search
-    matches = await verify_match(embedding, session)
+    matches = await verify_match(embedding, session, limit=limit)
 
     if matches:
         best = matches[0]
@@ -217,13 +225,20 @@ async def run_pipeline(
         }
 
 
-async def _add_spoof_audit(session, query_hash: str, image_bytes: bytes):
+async def _add_spoof_audit(
+    session,
+    query_hash: str,
+    gps_lat: Optional[float] = None,
+    gps_lon: Optional[float] = None,
+):
     """Helper: log a SPOOF_BLOCKED audit entry."""
     from app.db.vector_ops import add_audit_entry
     await add_audit_entry(
         session,
         event_type="SPOOF_BLOCKED",
         query_hash=query_hash,
+        gps_lat=gps_lat,
+        gps_lon=gps_lon,
     )
 
 
@@ -245,7 +260,7 @@ async def register_pipeline(
         aligned = detect_face(content)
     else:
         query_hash = compute_query_hash(b"")
-        await _add_spoof_audit(session, query_hash, content)
+        await _add_spoof_audit(session, query_hash)
         return {
             "status": "SPOOF_BLOCKED",
             "error": "Liveness check failed — possible spoof detected",
@@ -261,7 +276,7 @@ async def register_pipeline(
     from app.db.vector_ops import register_profile, add_audit_entry
 
     profile_id = await register_profile(
-        session, suspect_name, alias, demographics, embedding.tobytes()
+        session, suspect_name, alias, demographics, embedding
     )
 
     query_hash = compute_query_hash(embedding.tobytes())

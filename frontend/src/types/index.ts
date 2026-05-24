@@ -40,6 +40,8 @@ export interface SearchResponse {
   }>;
   gpsLat: number | null;
   gpsLon: number | null;
+  matchThreshold?: number | null;
+  alertId?: number | null;
 }
 
 export interface RegisterResponse {

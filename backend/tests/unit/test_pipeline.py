@@ -12,6 +12,7 @@ Covers every code path in pipeline.py:
 from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 import io
+import os
 import asyncio
 import json
 
@@ -558,9 +559,11 @@ class TestAuthMiddlewareIntegration:
         client = TestClient(
             __import__("app.main", fromlist=["app"]).app, raise_server_exceptions=False
         )
+        username = os.environ.get("ADMIN_TEST_USERNAME", "")
+        password = os.environ.get("ADMIN_TEST_PASSWORD", "")
         response = client.post(
             "/api/v1/login",
-            json={"username": "admin", "password": "admin123"},
+            json={"username": username, "password": password},
         )
         # May return 200 (success) or 401 (wrong credentials in test env)
         assert response.status_code in (200, 401)
@@ -587,9 +590,11 @@ class TestAuthEndpoint:
         client = TestClient(
             __import__("app.main", fromlist=["app"]).app, raise_server_exceptions=False
         )
+        username = os.environ.get("ADMIN_TEST_USERNAME", "")
+        password = os.environ.get("ADMIN_TEST_PASSWORD", "")
         response = client.post(
             "/api/v1/login",
-            json={"username": "admin", "password": "admin123"},
+            json={"username": username, "password": password},
         )
         data = response.json()
         assert response.status_code == 200
@@ -625,9 +630,11 @@ class TestAuthEndpoint:
             __import__("app.main", fromlist=["app"]).app, raise_server_exceptions=False
         )
         # First get a token
+        username = os.environ.get("ADMIN_TEST_USERNAME", "")
+        password = os.environ.get("ADMIN_TEST_PASSWORD", "")
         login_resp = client.post(
             "/api/v1/login",
-            json={"username": "admin", "password": "admin123"},
+            json={"username": username, "password": password},
         )
         token = login_resp.json()["access_token"]
         # Then refresh it

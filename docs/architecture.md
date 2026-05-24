@@ -46,7 +46,7 @@
 
 ### 2.3 Database (PostgreSQL + pgvector)
 
-- **suspect_profiles** — Stores encrypted 512-d ArcFace embeddings with HNSW index
+- **suspect_profiles** — Stores pgvector `face_embedding` for ANN queries plus AES-256 `face_embedding_enc` payload
 - **audit_log** — Append-only audit trail (INSERT only)
 - **alerts** — Human-in-the-loop confirmation workflow
 
@@ -68,7 +68,7 @@
 
 - **JWT auth** on all non-health endpoints (HS256, 8h expiry)
 - **Input validation**: MIME type, file size, image dimensions
-- **AES-256 encryption** of embeddings at rest (in production)
+- **AES-256 encryption** of embeddings at rest (`face_embedding_enc`) with volume encryption for pgvector storage
 - **TLS 1.3** in transit (Docker Compose with reverse proxy)
 - **Append-only audit_log**: no UPDATE or DELETE grants
 - **No raw image storage**: only embeddings persist

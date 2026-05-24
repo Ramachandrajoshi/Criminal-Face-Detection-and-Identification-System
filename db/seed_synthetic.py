@@ -58,15 +58,20 @@ def generate_embedding() -> np.ndarray:
 def generate_demographics() -> dict:
     age_band = random.choice(["18-35", "36-60", "60+"])
     gender = random.choice(GENDERS)
-    ethnicity = random.choice(ETHNICICS)
+    ethnicity = random.choice(ETHNICITIES)
     return {"age_band": age_band, "gender": gender, "ethnicity": ethnicity}
 
 
 def seed(count: int = DEFAULT_COUNT):
+    password = os.getenv("POSTGRES_PASSWORD")
+    if not password:
+        print("ERROR: POSTGRES_PASSWORD is required.")
+        sys.exit(1)
+
     conn = psycopg2.connect(
         dbname=os.getenv("POSTGRES_DB", "criminaldb"),
         user=os.getenv("POSTGRES_USER", "appuser"),
-        password=os.getenv("POSTGRES_PASSWORD", "changeme"),
+        password=password,
         host=os.getenv("POSTGRES_HOST", "localhost"),
         port=os.getenv("POSTGRES_PORT", "5432"),
     )

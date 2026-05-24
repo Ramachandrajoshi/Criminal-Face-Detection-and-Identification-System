@@ -6,12 +6,13 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Suspect profiles table: stores encrypted 512-d face embeddings
 CREATE TABLE suspect_profiles (
-    id               SERIAL PRIMARY KEY,
-    suspect_name     VARCHAR(100) NOT NULL,
-    alias            VARCHAR(100),
-    demographics     JSONB,
-    face_embedding   vector(512) NOT NULL,
-    created_at       TIMESTAMPTZ DEFAULT now()
+    id                 SERIAL PRIMARY KEY,
+    suspect_name       VARCHAR(100) NOT NULL,
+    alias              VARCHAR(100),
+    demographics       JSONB,
+    face_embedding     vector(512) NOT NULL,
+    face_embedding_enc BYTEA,
+    created_at         TIMESTAMPTZ DEFAULT now()
 );
 
 -- HNSW index for fast approximate nearest neighbour search

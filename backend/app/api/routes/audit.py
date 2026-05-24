@@ -31,6 +31,8 @@ async def get_audit_log(
     Retrieve audit log entries (read-only, append-only table).
     Admin access only — requires valid JWT.
     """
+    if _user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     offset = (page - 1) * page_size
     params = {"limit": page_size, "offset": offset}
 
