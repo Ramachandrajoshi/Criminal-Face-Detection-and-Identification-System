@@ -86,7 +86,7 @@ def extract_embedding(aligned_face: np.ndarray) -> Optional[np.ndarray]:
         result = DeepFace.represent(
             img_path=aligned_face,
             model_name=settings.deepface_model,
-            detector_backend=settings.deepface_detector,
+            detector_backend="skip",
             enforce_detection=False,
         )
     except Exception as exc:
