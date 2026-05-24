@@ -96,7 +96,7 @@ async def register_profile(
     sql = text(
         """
         INSERT INTO suspect_profiles (suspect_name, alias, demographics, face_embedding, face_embedding_enc)
-        VALUES (:suspect_name, :alias, :demographics, :vec::vector, :enc)
+        VALUES (:suspect_name, :alias, :demographics, CAST(:vec AS vector), :enc)
         RETURNING id
         """
     )
@@ -112,7 +112,11 @@ async def register_profile(
         },
     )
 
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     return int(result.scalar_one())
 
 
@@ -137,8 +141,12 @@ async def add_audit_entry(
         gps_lon=gps_lon,
     )
     session.add(entry)
-    await session.commit()
-    await session.refresh(entry)
+    try:
+        await session.commit()
+        await session.refresh(entry)
+    except Exception:
+        await session.rollback()
+        raise
     return entry.id
 
 
@@ -164,8 +172,12 @@ async def create_alert(
         gps_lon=gps_lon,
     )
     session.add(alert)
-    await session.commit()
-    await session.refresh(alert)
+    try:
+        await session.commit()
+        await session.refresh(alert)
+    except Exception:
+        await session.rollback()
+        raise
     return alert.id
 
 
@@ -200,7 +212,15 @@ async def update_alert_status(
     )
     row = result.fetchone()
     if row:
-        await session.commit()
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
         return row[0]
-    await session.commit()
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     return None

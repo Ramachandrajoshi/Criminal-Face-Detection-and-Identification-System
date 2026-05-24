@@ -118,17 +118,17 @@ api.interceptors.response.use(
       try {
         // Try to refresh the token if we have one
         if (currentToken) {
-          const refreshResponse = await api.post<TokenResponse>('/api/v1/token/refresh', {
+          const refreshResponse = await api.post<any>('/api/v1/token/refresh', {
             access_token: currentToken,
           });
-          const { accessToken, expiresIn } = refreshResponse.data;
+          const { access_token, expires_in } = refreshResponse.data;
           const user = getUserPayload();
-          storeToken(accessToken, expiresIn, user ?? { sub: 'unknown', role: 'admin' });
+          storeToken(access_token, expires_in, user ?? { sub: 'unknown', role: 'admin' });
 
-          api.defaults.headers.common.Authorization = `Bearer ${accessToken}`;
-          originalRequest.headers.Authorization = `Bearer ${accessToken}`;
+          api.defaults.headers.common.Authorization = `Bearer ${access_token}`;
+          originalRequest.headers.Authorization = `Bearer ${access_token}`;
 
-          processQueue(null, accessToken);
+          processQueue(null, access_token);
           return api(originalRequest);
         } else {
           // No token — force logout and redirect to login
@@ -155,21 +155,37 @@ api.interceptors.response.use(
 // ── Auth API ────────────────────────────────────────────────────
 
 export const login = (creds: LoginCredentials): Promise<TokenResponse> =>
-  api.post<TokenResponse>('/api/v1/login', creds).then((r) => r.data);
+  api.post<any>('/api/v1/login', creds).then((r) => ({
+    accessToken: r.data.access_token,
+    tokenType: r.data.token_type || 'bearer',
+    expiresIn: r.data.expires_in,
+  }));
 
 export const refreshToken = (token: string): Promise<TokenResponse> =>
-  api.post<TokenResponse>('/api/v1/token/refresh', { access_token: token }).then((r) => r.data);
+  api.post<any>('/api/v1/token/refresh', { access_token: token }).then((r) => ({
+    accessToken: r.data.access_token,
+    tokenType: r.data.token_type || 'bearer',
+    expiresIn: r.data.expires_in,
+  }));
 
 export const logout = (): void => clearToken();
 
 // ── Search ───────────────────────────────────────────────────────
 
-export const searchFace = (formData: FormData): Promise<SearchResponse> =>
-  api
+export const searchFace = (
+  formData: FormData,
+  isLiveCapture = false,
+): Promise<SearchResponse> => {
+  // Append the liveness flag so the backend knows whether to run anti-spoofing.
+  // Photo uploads always pass false; live camera captures pass true.
+  formData.append('is_live_capture', String(isLiveCapture));
+  return api
     .post<SearchResponse>('/api/v1/search', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
     .then((r) => r.data);
+};
+
 
 // ── Register ─────────────────────────────────────────────────────
 
@@ -179,6 +195,120 @@ export const registerFace = (formData: FormData): Promise<RegisterResponse> =>
       headers: { 'Content-Type': 'multipart/form-data' },
     })
     .then((r) => r.data);
+
+export interface BatchFileResult {
+  filename: string;
+  status: 'REGISTERED' | 'ERROR' | 'SPOOF_BLOCKED';
+  profileId: number | null;
+  suspectName: string;
+  error: string | null;
+}
+
+export interface BatchRegisterResponse {
+  totalFiles: number;
+  registered: number;
+  failed: number;
+  results: BatchFileResult[];
+}
+
+export const registerFacesBatch = (formData: FormData): Promise<BatchRegisterResponse> =>
+  api
+    .post<BatchRegisterResponse>('/api/v1/register/batch', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    .then((r) => r.data);
+
+// ── Streaming batch registration (SSE) ───────────────────────────
+
+export type SseEventType = 'start' | 'progress' | 'done';
+
+export interface SseProgressEvent {
+  type: 'start' | 'progress';
+  processed: number;
+  total: number;
+  filename?: string;
+  suspectName?: string;
+  status?: 'REGISTERED' | 'ERROR' | 'SPOOF_BLOCKED';
+  profileId?: number | null;
+  error?: string | null;
+  elapsedMs: number;
+  fileMs?: number;
+}
+
+export interface SseDoneEvent {
+  type: 'done';
+  processed: number;
+  total: number;
+  registered: number;
+  failed: number;
+  totalMs: number;
+}
+
+export type SseEvent = SseProgressEvent | SseDoneEvent;
+
+/**
+ * Stream-register multiple files via POST /api/v1/register/batch/stream.
+ * Calls `onEvent` for every SSE event received.
+ * Returns a cancel function that aborts the request.
+ */
+export function registerFacesBatchStream(
+  formData: FormData,
+  onEvent: (event: SseEvent) => void,
+  onError?: (err: Error) => void,
+): () => void {
+  const controller = new AbortController();
+
+  const token = getToken();
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '';
+
+  fetch(`${baseUrl}/api/v1/register/batch/stream`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        const text = await response.text().catch(() => response.statusText);
+        throw new Error(`Server error ${response.status}: ${text}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE lines look like: "data: {...}\n\n"
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';          // keep incomplete tail
+
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          const json = line.slice('data:'.length).trim();
+          try {
+            const event = JSON.parse(json) as SseEvent;
+            onEvent(event);
+          } catch {
+            // malformed SSE frame — skip
+          }
+        }
+      }
+    })
+    .catch((err: unknown) => {
+      if (err instanceof Error && err.name === 'AbortError') return; // cancelled
+      onError?.(err instanceof Error ? err : new Error(String(err)));
+    });
+
+  return () => controller.abort();
+}
 
 // ── Alerts ───────────────────────────────────────────────────────
 

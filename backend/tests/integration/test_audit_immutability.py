@@ -11,14 +11,19 @@ class TestAuditImmutability:
 
     def test_audit_log_sql_has_no_delete_grant(self):
         """Verify init.sql does not contain DELETE/UPDATE on audit_log."""
-        init_sql = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "..",
-            "db",
-            "init.sql",
-        )
+        # Robustly search upwards for the db/init.sql file to support both host and container layouts
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        init_sql = None
+        while current_dir and current_dir != os.path.dirname(current_dir):
+            candidate = os.path.join(current_dir, "db", "init.sql")
+            if os.path.exists(candidate):
+                init_sql = candidate
+                break
+            current_dir = os.path.dirname(current_dir)
+
+        if not init_sql:
+            pytest.fail("Could not locate db/init.sql in parent directories")
+
         with open(init_sql) as f:
             content = f.read().upper()
 

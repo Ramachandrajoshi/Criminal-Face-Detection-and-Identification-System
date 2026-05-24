@@ -24,10 +24,16 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     return jwt.encode(to_encode, settings.jwt_secret, algorithm="HS256")
 
 
-def decode_access_token(token: str) -> dict:
+def decode_access_token(token: str, verify_exp: bool = True) -> dict:
     """Decode and validate a JWT access token."""
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        options = {"verify_exp": verify_exp}
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=["HS256"],
+            options=options,
+        )
         return payload
     except JWTError as exc:
         raise HTTPException(

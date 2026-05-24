@@ -1,6 +1,6 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
-import { AuthProvider } from './hooks/useAuth';
+import { AuthProvider, useAuth } from './hooks/useAuth';
 import './index.css';
 
 // ── Lazy-load components ────────────────────────────────────────
@@ -43,11 +43,22 @@ function LoadingFallback(): JSX.Element {
 // ── Route resolver ──────────────────────────────────────────────
 
 function AppShell(): JSX.Element {
+  const { isAuthenticated, isLoading } = useAuth();
   const isLoginPage = window.location.pathname === '/login';
+
+  useEffect(() => {
+    if (isAuthenticated && isLoginPage) {
+      window.location.href = '/';
+    }
+  }, [isAuthenticated, isLoginPage]);
+
+  if (isLoading) {
+    return <LoadingFallback />;
+  }
 
   return (
     <Suspense fallback={<LoadingFallback />}>
-      {isLoginPage ? <LoginPage /> : <App />}
+      {isLoginPage && !isAuthenticated ? <LoginPage /> : <App />}
     </Suspense>
   );
 }
