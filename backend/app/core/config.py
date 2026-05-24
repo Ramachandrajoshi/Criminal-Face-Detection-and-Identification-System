@@ -11,8 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
-        case_sensitive=True,
+        env_file=(".env", ".env.docker"),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
     )
     # Model
     deepface_model: str = "ArcFace"

@@ -80,9 +80,9 @@ function AppContent(): JSX.Element {
 
   const playAlertSound = useCallback(() => {
     try {
-      const AudioContext = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioContext) return;
-      const ctx = new AudioContext();
+      const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: new () => AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) return;
+      const ctx = new AudioContextCtor();
       const oscillator = ctx.createOscillator();
       const gain = ctx.createGain();
 

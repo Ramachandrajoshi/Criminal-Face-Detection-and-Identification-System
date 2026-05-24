@@ -5,8 +5,8 @@ Authentication endpoint — login, get JWT token.
 import logging
 import secrets
 
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
-from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 
 from app.core.auth import create_access_token, decode_access_token
@@ -28,13 +28,9 @@ class TokenResponse(BaseModel):
     expires_in: int  # seconds
 
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
 def _validate_credentials(username: str, password: str) -> bool:
     """
-    Validate credentials.
-    In production, replace with DB lookup against hashed passwords.
+    Validate credentials against stored bcrypt hash.
     """
     if not settings.admin_username or not settings.admin_password_hash:
         logger.error("Admin credentials are not configured")
@@ -43,7 +39,8 @@ def _validate_credentials(username: str, password: str) -> bool:
     if username != settings.admin_username:
         return False
 
-    return pwd_context.verify(password, settings.admin_password_hash)
+    stored_hash = settings.admin_password_hash.encode("utf-8")
+    return bcrypt.checkpw(password.encode("utf-8"), stored_hash)
 
 
 @router.post("/login", response_model=TokenResponse)

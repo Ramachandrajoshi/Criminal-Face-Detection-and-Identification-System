@@ -116,7 +116,7 @@ api.interceptors.response.use(
       const currentToken = getToken();
 
       try {
-        // Try to refresh the token
+        // Try to refresh the token if we have one
         if (currentToken) {
           const refreshResponse = await api.post<TokenResponse>('/api/v1/token/refresh', {
             access_token: currentToken,
@@ -130,6 +130,12 @@ api.interceptors.response.use(
 
           processQueue(null, accessToken);
           return api(originalRequest);
+        } else {
+          // No token — force logout and redirect to login
+          clearToken();
+          processQueue(error, null);
+          window.location.href = '/login';
+          return Promise.reject(error);
         }
       } catch (_refreshErr) {
         // Refresh failed — force logout
