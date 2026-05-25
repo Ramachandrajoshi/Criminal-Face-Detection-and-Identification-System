@@ -29,13 +29,16 @@ from typing import AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.pipeline import register_pipeline
 from app.core.validation import validate_image_dimensions
+from app.db.models import SuspectProfile as SuspectProfileModel
 from app.db.session import async_session_factory, get_session
-from app.schemas.face import RegisterResponse
+from app.db.vector_ops import add_audit_entry, compute_query_hash
+from app.schemas.face import RegisterResponse, SuspectProfileOut, SuspectUpdateIn
 
 logger = logging.getLogger(__name__)
 
@@ -435,3 +438,141 @@ async def register_suspects_batch_stream(
             "Connection": "keep-alive",
         },
     )
+
+
+# ── Suspect CRUD ─────────────────────────────────────────────────
+
+
+@router.get("/suspects", response_model=list[SuspectProfileOut])
+async def list_suspects(
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+):
+    """
+    List all registered suspect profiles.
+    Embeddings are NEVER returned — metadata only.
+    """
+    result = await session.execute(
+        select(
+            SuspectProfileModel.id,
+            SuspectProfileModel.suspect_name,
+            SuspectProfileModel.alias,
+            SuspectProfileModel.demographics,
+            SuspectProfileModel.created_at,
+        ).order_by(SuspectProfileModel.id.desc())
+    )
+    rows = result.all()
+    return [
+        SuspectProfileOut(
+            id=r.id,
+            suspect_name=r.suspect_name,
+            alias=r.alias,
+            demographics=r.demographics,
+            created_at=r.created_at.isoformat() if r.created_at else "",
+        )
+        for r in rows
+    ]
+
+
+@router.get("/suspects/{suspect_id}", response_model=SuspectProfileOut)
+async def get_suspect(
+    suspect_id: int,
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+):
+    """Get a single suspect profile by ID (metadata only)."""
+    result = await session.execute(
+        select(
+            SuspectProfileModel.id,
+            SuspectProfileModel.suspect_name,
+            SuspectProfileModel.alias,
+            SuspectProfileModel.demographics,
+            SuspectProfileModel.created_at,
+        ).where(SuspectProfileModel.id == suspect_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Suspect not found")
+    return SuspectProfileOut(
+        id=row.id,
+        suspect_name=row.suspect_name,
+        alias=row.alias,
+        demographics=row.demographics,
+        created_at=row.created_at.isoformat() if row.created_at else "",
+    )
+
+
+@router.patch("/suspects/{suspect_id}", response_model=SuspectProfileOut)
+async def update_suspect(
+    suspect_id: int,
+    body: SuspectUpdateIn,
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+):
+    """
+    Update a suspect's metadata (name / alias / demographics).
+    The face embedding is never modified via this endpoint.
+    """
+    result = await session.execute(
+        select(SuspectProfileModel).where(SuspectProfileModel.id == suspect_id)
+    )
+    suspect = result.scalar_one_or_none()
+    if not suspect:
+        raise HTTPException(status_code=404, detail="Suspect not found")
+
+    if body.suspect_name is not None:
+        suspect.suspect_name = body.suspect_name.strip()
+    if body.alias is not None:
+        suspect.alias = body.alias.strip() or None
+    if body.demographics is not None:
+        suspect.demographics = body.demographics
+
+    await session.commit()
+    await session.refresh(suspect)
+
+    return SuspectProfileOut(
+        id=suspect.id,
+        suspect_name=suspect.suspect_name,
+        alias=suspect.alias,
+        demographics=suspect.demographics,
+        created_at=suspect.created_at.isoformat() if suspect.created_at else "",
+    )
+
+
+@router.delete("/suspects/{suspect_id}", status_code=204)
+async def delete_suspect(
+    suspect_id: int,
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+):
+    """
+    Hard-delete a suspect profile.
+    Logs a REGISTER_DELETE audit entry BEFORE deleting (audit log is append-only).
+    Alerts referencing this suspect are left untouched (operator must dismiss manually).
+    """
+    result = await session.execute(
+        select(
+            SuspectProfileModel.id,
+            SuspectProfileModel.suspect_name,
+        ).where(SuspectProfileModel.id == suspect_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Suspect not found")
+
+    # Write audit entry BEFORE delete (audit log is append-only)
+    await add_audit_entry(
+        session,
+        event_type="REGISTER_DELETE",
+        query_hash=compute_query_hash(str(suspect_id).encode()),
+        result_name=None,   # no PII in logs — only suspect_id via query_hash
+        distance=None,
+        gps_lat=None,
+        gps_lon=None,
+    )
+
+    await session.execute(
+        sa_delete(SuspectProfileModel).where(SuspectProfileModel.id == suspect_id)
+    )
+    await session.commit()
+    # 204 No Content

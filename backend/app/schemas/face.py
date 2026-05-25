@@ -95,3 +95,31 @@ class AuditEntryResponse(_BaseCamel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     database: str = "connected"
+
+
+class SuspectProfileOut(_BaseCamel):
+    id: int
+    suspect_name: str
+    alias: Optional[str] = None
+    demographics: Optional[dict] = None
+    created_at: str   # ISO-8601 string
+
+
+class SuspectUpdateIn(BaseModel):
+    suspect_name: Optional[str] = Field(None, max_length=100)
+    alias: Optional[str] = Field(None, max_length=100)
+    demographics: Optional[dict] = None
+
+
+class BatchSearchProgressEvent(_BaseCamel):
+    type: str               # "start" | "progress" | "done"
+    processed: int = 0
+    total: int = 0
+    filename: Optional[str] = None
+    status: Optional[str] = None      # MATCH | NO_MATCH | SPOOF_BLOCKED | ERROR
+    query_hash: Optional[str] = None
+    matches: list[MatchResult] = []
+    alert_id: Optional[int] = None
+    elapsed_ms: int = 0
+    file_ms: Optional[int] = None
+    error: Optional[str] = None

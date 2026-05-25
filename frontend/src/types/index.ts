@@ -92,3 +92,56 @@ export interface AuthContextType {
   getToken: () => string | null;
   isLoading: boolean;
 }
+
+// ── Suspect CRUD ─────────────────────────────────────────────────
+export interface SuspectProfile {
+  id: number;
+  suspectName: string;
+  alias: string | null;
+  demographics: Record<string, unknown> | null;
+  createdAt: string; // ISO-8601
+}
+
+// ── Batch Search ─────────────────────────────────────────────────
+export interface BatchSearchMatch {
+  id: number;
+  suspectName: string;
+  alias: string | null;
+  distance: number;
+}
+
+export interface BatchSearchResultEntry {
+  filename: string;
+  status: 'MATCH' | 'NO_MATCH' | 'SPOOF_BLOCKED' | 'ERROR' | 'pending' | 'processing';
+  queryHash: string;
+  matches: BatchSearchMatch[];
+  alertId: number | null;
+  fileMs?: number;
+  error?: string | null;
+}
+
+export interface BatchSearchSseDoneEvent {
+  type: 'done';
+  processed: number;
+  total: number;
+  matched: number;
+  noMatch: number;
+  errors: number;
+  totalMs: number;
+}
+
+export interface BatchSearchSseProgressEvent {
+  type: 'start' | 'progress';
+  processed: number;
+  total: number;
+  filename?: string;
+  status?: 'MATCH' | 'NO_MATCH' | 'SPOOF_BLOCKED' | 'ERROR';
+  queryHash?: string;
+  matches?: BatchSearchMatch[];
+  alertId?: number | null;
+  elapsedMs: number;
+  fileMs?: number;
+  error?: string | null;
+}
+
+export type BatchSearchSseEvent = BatchSearchSseProgressEvent | BatchSearchSseDoneEvent;
