@@ -1,4 +1,6 @@
 import { useAlerts } from '../../hooks/useAlerts';
+import QueryImage from '../QueryImage';
+import SuspectImage from '../SuspectImage';
 
 const statusColor = (s: string): string =>
   s === 'CONFIRMED' ? '#ef4444'
@@ -83,46 +85,68 @@ export default function AlertsScreen(): JSX.Element {
               gap: '1.5rem',
             }}
           >
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span style={{
-                  background: `${eventColor(alert.eventType)}22`,
-                  color: eventColor(alert.eventType),
-                  padding: '0.125rem 0.5rem',
-                  borderRadius: '999px',
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                }}>
-                  {alert.eventType}
-                </span>
-                <span style={{ color: '#64748b', fontSize: '0.8125rem', fontFamily: 'monospace' }}>
-                  #{alert.id}
-                </span>
-                <span style={{
-                  color: statusColor(alert.status),
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                }}>
-                  {alert.status}
-                </span>
+            <div style={{ display: 'flex', gap: '1.25rem', alignItems: 'center', flex: 1 }}>
+              {/* Image previews */}
+              <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem' }}>
+                  <span style={{ fontSize: '0.6rem', color: '#64748b', fontWeight: 600 }}>QUERY</span>
+                  <QueryImage alertId={alert.id} style={{ width: '56px', height: '56px' }} />
+                </div>
+                {alert.suspectName && (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem' }}>
+                    <span style={{ fontSize: '0.6rem', color: '#ef4444', fontWeight: 600 }}>MATCH</span>
+                    <SuspectImage name={alert.suspectName} style={{ width: '56px', height: '56px' }} />
+                  </div>
+                )}
               </div>
 
-              <div style={{ fontSize: '0.8125rem', color: '#94a3b8' }}>
-                {alert.distance !== null && (
-                  <div>Distance: <span style={{ fontFamily: 'monospace' }}>{alert.distance.toFixed(4)}</span></div>
-                )}
-                {alert.gpsLat !== null && alert.gpsLon !== null && (
-                  <div>📍 Location: <span style={{ fontFamily: 'monospace' }}>{alert.gpsLat.toFixed(4)}, {alert.gpsLon.toFixed(4)}</span></div>
-                )}
-                <div style={{ color: '#64748b', marginTop: '0.25rem' }}>
-                  Time: {new Date(alert.createdAt).toLocaleString()}
+              {/* Alert details */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <span style={{
+                    background: `${eventColor(alert.eventType)}22`,
+                    color: eventColor(alert.eventType),
+                    padding: '0.125rem 0.5rem',
+                    borderRadius: '999px',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                  }}>
+                    {alert.eventType}
+                  </span>
+                  <span style={{ color: '#64748b', fontSize: '0.8125rem', fontFamily: 'monospace' }}>
+                    #{alert.id}
+                  </span>
+                  {alert.suspectName && (
+                    <span style={{ color: '#ef4444', fontWeight: 700, fontSize: '0.875rem' }}>
+                      👤 {alert.suspectName} {alert.suspectAlias ? `(${alert.suspectAlias})` : ''}
+                    </span>
+                  )}
+                  <span style={{
+                    color: statusColor(alert.status),
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                  }}>
+                    {alert.status}
+                  </span>
+                </div>
+
+                <div style={{ fontSize: '0.8125rem', color: '#94a3b8' }}>
+                  {alert.distance !== null && (
+                    <div>Distance: <span style={{ fontFamily: 'monospace' }}>{alert.distance.toFixed(4)}</span></div>
+                  )}
+                  {alert.gpsLat !== null && alert.gpsLon !== null && (
+                    <div>📍 Location: <span style={{ fontFamily: 'monospace' }}>{alert.gpsLat.toFixed(4)}, {alert.gpsLon.toFixed(4)}</span></div>
+                  )}
+                  <div style={{ color: '#64748b', marginTop: '0.25rem' }}>
+                    Time: {new Date(alert.createdAt).toLocaleString()}
+                  </div>
                 </div>
               </div>
             </div>
 
             {alert.status === 'PENDING_REVIEW' && (
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
                 <button
                   onClick={() => void confirm(alert.id, true)}
                   style={{

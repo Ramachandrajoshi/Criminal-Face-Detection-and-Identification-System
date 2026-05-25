@@ -72,6 +72,8 @@ class AlertResponse(_BaseCamel):
     id: int
     audit_log_id: Optional[int] = None
     suspect_id: Optional[int] = None
+    suspect_name: Optional[str] = None
+    suspect_alias: Optional[str] = None
     event_type: str
     distance: Optional[float] = None
     status: str  # "PENDING_REVIEW" | "CONFIRMED" | "DISMISSED"

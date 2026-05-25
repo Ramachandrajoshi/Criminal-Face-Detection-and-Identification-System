@@ -91,8 +91,11 @@ async def list_alerts(
             a.gps_lat,
             a.gps_lon,
             a.created_at,
-            a.confirmed_at
+            a.confirmed_at,
+            s.suspect_name,
+            s.alias AS suspect_alias
         FROM alerts a
+        LEFT JOIN suspect_profiles s ON a.suspect_id = s.id
         {where_clause}
         ORDER BY a.created_at DESC
         LIMIT :limit OFFSET :offset
@@ -114,6 +117,8 @@ async def list_alerts(
             gps_lon=row[7],
             created_at=row[8].isoformat() if row[8] else None,
             confirmed_at=row[9].isoformat() if row[9] else None,
+            suspect_name=row[10],
+            suspect_alias=row[11],
         )
         for row in rows
     ]

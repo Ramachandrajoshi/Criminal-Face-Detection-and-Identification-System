@@ -56,6 +56,8 @@ export interface AlertItem {
   id: number;
   auditLogId: number | null;
   suspectId: number | null;
+  suspectName?: string | null;
+  suspectAlias?: string | null;
   eventType: string;
   distance: number | null;
   status: AlertStatus;

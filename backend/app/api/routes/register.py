@@ -576,3 +576,46 @@ async def delete_suspect(
     )
     await session.commit()
     # 204 No Content
+
+
+# ── Suspect Test Image Retrieval ─────────────────────────────────
+
+from fastapi.responses import FileResponse
+import os
+
+@router.get("/suspects/image/{name}")
+async def get_suspect_test_image(
+    name: str,
+    _user: dict = Depends(get_current_user),
+):
+    """
+    Retrieve suspect mugshot from testdata directory for demonstration.
+    Does not violate database raw image storage rules.
+    """
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    testdata_dir = os.path.join(base_dir, "testdata")
+    
+    if not os.path.exists(testdata_dir):
+        raise HTTPException(status_code=404, detail="Testdata directory not found")
+        
+    # Standardise name: replace spaces with underscores, lower case
+    clean_name = name.strip().replace(" ", "_").lower()
+    
+    # List files in testdata
+    for filename in os.listdir(testdata_dir):
+        stem, ext = os.path.splitext(filename)
+        if stem.replace(" ", "_").lower() == clean_name:
+            file_path = os.path.join(testdata_dir, filename)
+            return FileResponse(file_path)
+            
+    # Also try replacing dashes with underscores
+    clean_name_underscores = clean_name.replace("-", "_")
+    for filename in os.listdir(testdata_dir):
+        stem, ext = os.path.splitext(filename)
+        std_stem = stem.replace(" ", "_").replace("-", "_").lower()
+        if std_stem == clean_name_underscores:
+            file_path = os.path.join(testdata_dir, filename)
+            return FileResponse(file_path)
+            
+    raise HTTPException(status_code=404, detail="Suspect image not found in testdata")
+
