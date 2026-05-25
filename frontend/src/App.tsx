@@ -122,7 +122,7 @@ function AppContent(): JSX.Element {
     { id: 'overview', label: 'Overview', icon: '📊' },
     { id: 'search', label: 'Search Suspect', icon: '🔍' },
     { id: 'camera', label: 'Live Feed', icon: '📷' },
-    { id: 'map', label: 'GPS Map', icon: '🗺️' },
+    // { id: 'map', label: 'GPS Map', icon: '🗺️' },
     { id: 'register', label: 'Register Roster', icon: '👤' },
     { id: 'alerts', label: 'Alerts Panel', icon: '🔔' },
   ];
