@@ -756,7 +756,7 @@ This project is licensed under the [MIT License](LICENSE).
 | **API Documentation** | http://localhost:8000/api/docs (Swagger UI) |
 | **Architecture Docs** | [`docs/architecture.md`](docs/architecture.md) |
 | **API Reference** | [`docs/api_reference.md`](docs/api_reference.md) |
-| **Issue Tracker** | GitHub Issues (configure your repo URL) |
+| **Issue Tracker** | GitHub Issues (https://github.com/Ramachandrajoshi/Criminal-Face-Detection-and-Identification-System) |
 | **Project Maintainer** | Contact the repository owner |
 
 ---
