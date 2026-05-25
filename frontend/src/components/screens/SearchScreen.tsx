@@ -7,6 +7,20 @@ import type {
   BatchSearchSseDoneEvent,
   BatchSearchSseProgressEvent,
 } from '../../types';
+import { storeAlertImage } from '../../utils/db';
+import SuspectImage from '../SuspectImage';
+
+function FileImagePreview({ file, style }: { file?: File; style?: React.CSSProperties }): JSX.Element | null {
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  if (!src) return null;
+  return <img src={src} alt="query preview" style={style} />;
+}
 
 // ── Status helpers ────────────────────────────────────────────────
 
@@ -80,6 +94,9 @@ function SingleSearchPanel(): JSX.Element {
       fd.append('file', file, 'query.jpg');
       const res = await searchFace(fd, false);
       setResult(res);
+      if (res.status === 'MATCH' && res.alertId && file instanceof Blob) {
+        void storeAlertImage(res.alertId, file);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Search failed');
     } finally {
@@ -169,11 +186,14 @@ function SingleSearchPanel(): JSX.Element {
             <>
               <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 {result.matches.map((m) => (
-                  <div key={m.id} style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '8px', padding: '0.75rem' }}>
-                    <div style={{ fontWeight: 700, color: '#ef4444' }}>{m.suspectName}</div>
-                    {m.alias && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{m.alias}</div>}
-                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.25rem', fontFamily: 'monospace' }}>
-                      Distance: {m.distance.toFixed(4)} / Threshold: {(result.matchThreshold ?? 0.58).toFixed(2)}
+                  <div key={m.id} style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '8px', padding: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <SuspectImage name={m.suspectName} style={{ width: '40px', height: '40px' }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, color: '#ef4444' }}>{m.suspectName}</div>
+                      {m.alias && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{m.alias}</div>}
+                      <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.25rem', fontFamily: 'monospace' }}>
+                        Distance: {m.distance.toFixed(4)} / Threshold: {(result.matchThreshold ?? 0.58).toFixed(2)}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -283,6 +303,13 @@ function BatchSearchPanel(): JSX.Element {
 
         if (event.type === 'progress') {
           const ev = event as BatchSearchSseProgressEvent;
+          if (ev.status === 'MATCH' && ev.alertId) {
+            const file = files[ev.processed - 1];
+            if (file) {
+              void storeAlertImage(ev.alertId, file);
+            }
+          }
+
           setBatch((prev) => {
             if (!prev) return prev;
             const updatedEntries = prev.entries.map((e, idx) => {
@@ -506,18 +533,28 @@ function BatchSearchPanel(): JSX.Element {
                     >
                       <td style={{ padding: '0.625rem 1rem', color: '#64748b', fontFamily: 'monospace' }}>{idx + 1}</td>
                       <td style={{ padding: '0.625rem 1rem', color: '#94a3b8', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {entry.filename}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <FileImagePreview file={files[idx]} style={{ width: '28px', height: '28px', borderRadius: '4px', objectFit: 'cover' }} />
+                          <span>{entry.filename}</span>
+                        </div>
                       </td>
                       <td style={{ padding: '0.625rem 1rem' }}>
                         <StatusBadge status={entry.status} />
                       </td>
                       <td style={{ padding: '0.625rem 1rem', color: entry.status === 'MATCH' ? '#ef4444' : '#64748b', fontWeight: entry.status === 'MATCH' ? 700 : 400 }}>
-                        {entry.matches[0]?.suspectName ?? '—'}
-                        {entry.matches.length > 1 && (
-                          <span style={{ color: '#38bdf8', fontSize: '0.7rem', marginLeft: '0.4rem' }}>
-                            +{entry.matches.length - 1} {expandedRows.has(idx) ? '▲' : '▼'}
-                          </span>
-                        )}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          {entry.status === 'MATCH' && entry.matches[0] && (
+                            <SuspectImage name={entry.matches[0].suspectName} style={{ width: '28px', height: '28px' }} />
+                          )}
+                          <div>
+                            <div>{entry.matches[0]?.suspectName ?? '—'}</div>
+                            {entry.matches.length > 1 && (
+                              <span style={{ color: '#38bdf8', fontSize: '0.7rem' }}>
+                                +{entry.matches.length - 1} {expandedRows.has(idx) ? '▲' : '▼'}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </td>
                       <td style={{ padding: '0.625rem 1rem', color: '#94a3b8', fontFamily: 'monospace' }}>
                         {entry.matches[0] !== undefined ? entry.matches[0].distance.toFixed(4) : '—'}
@@ -531,7 +568,8 @@ function BatchSearchPanel(): JSX.Element {
                         <td colSpan={6} style={{ padding: '0.5rem 1rem 0.75rem 3rem' }}>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
                             {entry.matches.slice(1).map((m) => (
-                              <div key={m.id} style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', gap: '1rem' }}>
+                              <div key={m.id} style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                                <SuspectImage name={m.suspectName} style={{ width: '24px', height: '24px' }} />
                                 <span style={{ color: '#ef4444', fontWeight: 600 }}>{m.suspectName}</span>
                                 {m.alias && <span style={{ color: '#64748b' }}>{m.alias}</span>}
                                 <span style={{ fontFamily: 'monospace' }}>{m.distance.toFixed(4)}</span>

@@ -8,6 +8,8 @@ import {
 } from '../../api/client';
 import type { SseEvent, SseProgressEvent, SseDoneEvent } from '../../api/client';
 import type { SuspectProfile } from '../../types';
+import { storeSuspectImage } from '../../utils/db';
+import SuspectImage from '../SuspectImage';
 
 // ── Local helpers ────────────────────────────────────────────────
 
@@ -180,6 +182,9 @@ export default function RegisterScreen(): JSX.Element {
       const t0 = Date.now();
       registerFace(formData)
         .then(() => {
+          // Store registered suspect image in local IndexedDB cache
+          void storeSuspectImage(entry.name.trim() || nameFromFilename(entry.file.name), entry.file);
+
           const fileMs = Date.now() - t0;
           if (tickRef.current) clearInterval(tickRef.current);
           const totalMs = Date.now() - startTimeRef.current;
@@ -262,6 +267,14 @@ export default function RegisterScreen(): JSX.Element {
 
             const updatedEntries = prev.entries.map((e, idx) => {
               if (idx === ev.processed - 1) {
+                // Store registered suspect image in local IndexedDB cache on progress success
+                if (fileStatus === 'REGISTERED') {
+                  const entry = files[idx];
+                  if (entry) {
+                    void storeSuspectImage(entry.name.trim() || nameFromFilename(entry.file.name), entry.file);
+                  }
+                }
+
                 return {
                   ...e,
                   status: fileStatus as ProgressEntry['status'],
@@ -508,7 +521,10 @@ export default function RegisterScreen(): JSX.Element {
                           style={{ background: '#0f172a', border: '1px solid #38bdf8', color: '#fff', fontSize: '0.75rem', padding: '0.2rem', borderRadius: '4px' }}
                         />
                       ) : (
-                        s.suspectName
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <SuspectImage name={s.suspectName} style={{ width: '28px', height: '28px' }} />
+                          <span>{s.suspectName}</span>
+                        </div>
                       )}
                     </td>
                     <td style={{ padding: '0.75rem' }}>
