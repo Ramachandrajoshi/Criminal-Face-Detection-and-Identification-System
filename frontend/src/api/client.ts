@@ -6,6 +6,8 @@ import type {
   AuditEntry,
   LoginCredentials,
   TokenResponse,
+  SuspectProfile,
+  BatchSearchSseEvent,
 } from '../types';
 
 // ── Token storage helpers ────────────────────────────────────────
@@ -348,3 +350,73 @@ export const getAuditLog = (
 
 export const healthCheck = (): Promise<{ status: string }> =>
   api.get('/api/v1/health').then((r) => r.data);
+
+// ── Suspects CRUD ────────────────────────────────────────────────
+
+export const getSuspects = (): Promise<SuspectProfile[]> =>
+  api.get<SuspectProfile[]>('/api/v1/suspects').then((r) => r.data);
+
+export const getSuspect = (id: number): Promise<SuspectProfile> =>
+  api.get<SuspectProfile>(`/api/v1/suspects/${id}`).then((r) => r.data);
+
+export const updateSuspect = (
+  id: number,
+  patch: { suspectName?: string; alias?: string | null; demographics?: Record<string, unknown> | null },
+): Promise<SuspectProfile> =>
+  api.patch<SuspectProfile>(`/api/v1/suspects/${id}`, patch).then((r) => r.data);
+
+export const deleteSuspect = (id: number): Promise<void> =>
+  api.delete(`/api/v1/suspects/${id}`).then(() => undefined);
+
+// ── Batch Search SSE ─────────────────────────────────────────────
+
+export function searchFacesBatchStream(
+  formData: FormData,
+  onEvent: (event: BatchSearchSseEvent) => void,
+  onError?: (err: Error) => void,
+): () => void {
+  const controller = new AbortController();
+  const token = getToken();
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '';
+
+  fetch(`${baseUrl}/api/v1/search/batch/stream`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        const text = await response.text().catch(() => response.statusText);
+        throw new Error(`Server error ${response.status}: ${text}`);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith('data:')) continue;
+          const json = line.slice('data:'.length).trim();
+          try {
+            const event = JSON.parse(json) as BatchSearchSseEvent;
+            onEvent(event);
+          } catch {
+            // malformed SSE frame — skip
+          }
+        }
+      }
+    })
+    .catch((err: unknown) => {
+      if (err instanceof Error && err.name === 'AbortError') return;
+      onError?.(err instanceof Error ? err : new Error(String(err)));
+    });
+
+  return () => controller.abort();
+}

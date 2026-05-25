@@ -1,13 +1,14 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useAuth } from './hooks/useAuth';
-import Dashboard from './components/Dashboard';
-import CameraFeed from './components/CameraFeed';
-import AlertPanel from './components/AlertPanel';
-import SuspectMap from './components/SuspectMap';
 import { useAlerts } from './hooks/useAlerts';
-import { searchFace } from './api/client';
+import OverviewScreen from './components/screens/OverviewScreen';
+import SearchScreen from './components/screens/SearchScreen';
+import LiveCameraScreen from './components/screens/LiveCameraScreen';
+import MapScreen from './components/screens/MapScreen';
+import RegisterScreen from './components/screens/RegisterScreen';
+import AlertsScreen from './components/screens/AlertsScreen';
 
-export type Tab = 'dashboard' | 'camera' | 'map' | 'alerts';
+export type Tab = 'overview' | 'search' | 'camera' | 'map' | 'register' | 'alerts';
 
 // ── Auth Guard: redirect to login if not authenticated ──────────
 
@@ -67,9 +68,9 @@ function AuthGuard({ children }: { children: React.ReactNode }): JSX.Element {
 
 function AppContent(): JSX.Element {
   const { logout, user, isAuthenticated } = useAuth();
-  const [activeTab, setActiveTab] = useState<Tab>('dashboard');
-  const [isSearching, setIsSearching] = useState(false);
-  const { alerts, refresh } = useAlerts();
+  const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const { alerts } = useAlerts();
+  const prevPendingRef = useRef<number>(0);
 
   // Redirect to login if not authenticated
   useEffect(() => {
@@ -98,72 +99,65 @@ function AppContent(): JSX.Element {
         void ctx.close();
       };
     } catch {
-      // Ignore audio failures (browser permissions, unsupported API)
+      // Ignore audio failures
     }
   }, []);
 
-  const handleFrameCaptured = useCallback(async (blob: Blob, gpsLat?: number | null, gpsLon?: number | null) => {
-    setIsSearching(true);
-    try {
-      const formData = new FormData();
-      formData.append('file', blob, 'capture.jpg');
-      if (gpsLat !== undefined && gpsLat !== null && gpsLon !== undefined && gpsLon !== null) {
-        formData.append('gps_lat', gpsLat.toString());
-        formData.append('gps_lon', gpsLon.toString());
-      }
+  const pendingCount = alerts.filter((a) => a.status === 'PENDING_REVIEW').length;
 
-      const response = await searchFace(formData, true);
-
-      if (response.status === 'MATCH') {
-        playAlertSound();
-        await refresh();
-      }
-    } catch (err) {
-      console.error('Search failed:', err);
-    } finally {
-      setIsSearching(false);
+  // Play alert sound if a new pending alert arrives in the background
+  useEffect(() => {
+    if (pendingCount > prevPendingRef.current) {
+      playAlertSound();
     }
-  }, [playAlertSound, refresh]);
+    prevPendingRef.current = pendingCount;
+  }, [pendingCount, playAlertSound]);
 
   const handleLogout = useCallback(() => {
     logout();
     window.location.href = '/login';
   }, [logout]);
 
-  const pendingCount = alerts.filter((a: { status: string }) => a.status === 'PENDING_REVIEW').length;
-
-  const mapAlerts = alerts.map((a: { id: number; gpsLat: number | null; gpsLon: number | null; status: string; eventType: string }) => ({
-    id: a.id,
-    gpsLat: a.gpsLat,
-    gpsLon: a.gpsLon,
-    status: a.status,
-    eventType: a.eventType,
-  }));
-
   const tabs: Array<{ id: Tab; label: string; icon: string }> = [
-    { id: 'dashboard', label: 'Dashboard', icon: '📋' },
-    { id: 'camera', label: 'Live Camera', icon: '📷' },
-    { id: 'map', label: 'Map', icon: '🗺️' },
-    { id: 'alerts', label: 'Alerts', icon: '🔔' },
+    { id: 'overview', label: 'Overview', icon: '📊' },
+    { id: 'search', label: 'Search Suspect', icon: '🔍' },
+    { id: 'camera', label: 'Live Feed', icon: '📷' },
+    { id: 'map', label: 'GPS Map', icon: '🗺️' },
+    { id: 'register', label: 'Register Roster', icon: '👤' },
+    { id: 'alerts', label: 'Alerts Panel', icon: '🔔' },
   ];
 
   return (
-    <div className="app-container">
-      {/* ── Header ──────────────────────────────────────── */}
-      <header className="header">
+    <div className="app-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      {/* Header */}
+      <header className="header" style={{
+        background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+        padding: '1rem 2rem',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        borderBottom: '1px solid #1e293b'
+      }}>
         <div>
-          <h1>⚠ CRIMINAL FACE DETECTION SYSTEM</h1>
-          <span className="disclaimer">
+          <h1 style={{ fontSize: '1.25rem', fontWeight: 600, color: '#38bdf8', letterSpacing: '0.05em', margin: 0 }}>
+            ⚠ CRIMINAL FACE DETECTION SYSTEM
+          </h1>
+          <span className="disclaimer" style={{
+            fontSize: '0.75rem',
+            color: '#f59e0b',
+            background: 'rgba(245, 158, 11, 0.1)',
+            padding: '0.375rem 0.75rem',
+            borderRadius: '4px',
+            border: '1px solid rgba(245, 158, 11, 0.3)',
+            display: 'inline-block',
+            marginTop: '0.25rem'
+          }}>
             ⚖️ Decision Support Only — Requires Human Confirmation
           </span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <span style={{
-            fontSize: '0.75rem',
-            color: '#94a3b8',
-            fontFamily: 'monospace',
-          }}>
+          <span style={{ fontSize: '0.75rem', color: '#94a3b8', fontFamily: 'monospace' }}>
             👤 {user?.sub ?? 'unknown'}
           </span>
           <button
@@ -184,7 +178,7 @@ function AppContent(): JSX.Element {
         </div>
       </header>
 
-      {/* ── Navigation ──────────────────────────────────── */}
+      {/* Navigation */}
       <nav style={{
         background: '#1e293b',
         display: 'flex',
@@ -225,99 +219,14 @@ function AppContent(): JSX.Element {
         ))}
       </nav>
 
-      {/* ── Main Content ────────────────────────────────── */}
-      <main style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        {activeTab === 'dashboard' && (
-          <>
-            <Dashboard />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <SuspectMap alerts={mapAlerts} />
-            </div>
-            <AlertPanel />
-          </>
-        )}
-        {activeTab === 'camera' && (
-          <>
-            <Dashboard />
-            <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
-              <CameraFeed onFrameCaptured={handleFrameCaptured} isSearching={isSearching} />
-            </div>
-            <AlertPanel />
-          </>
-        )}
-        {activeTab === 'map' && (
-          <>
-            <div style={{ width: '300px', borderRight: '1px solid #334155', padding: '1rem', overflowY: 'auto' }}>
-              <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '1rem',
-              }}>
-                <h2 style={{
-                  fontSize: '0.875rem',
-                  fontWeight: 600,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
-                  color: '#94a3b8',
-                }}>
-                  Recent Activity
-                </h2>
-                <button
-                  className="btn"
-                  onClick={() => refresh()}
-                  style={{ background: '#334155', color: '#e2e8f0', fontSize: '0.75rem' }}
-                >
-                  ↻ Refresh
-                </button>
-              </div>
-              {alerts.slice(0, 20).map((a: { id: number; gpsLat: number | null; gpsLon: number | null; status: string; eventType: string }) => (
-                <div key={a.id} style={{
-                  background: '#1e293b',
-                  borderRadius: '6px',
-                  padding: '0.75rem',
-                  marginBottom: '0.5rem',
-                  fontSize: '0.8125rem',
-                  border: a.status === 'PENDING_REVIEW'
-                    ? '1px solid rgba(251, 191, 36, 0.3)'
-                    : '1px solid #334155',
-                }}>
-                  <div style={{
-                    color: a.status === 'CONFIRMED'
-                      ? '#ef4444'
-                      : a.status === 'PENDING_REVIEW'
-                        ? '#fbbf24'
-                        : '#64748b',
-                    fontWeight: 600,
-                  }}>
-                    {a.eventType} — #{a.id}
-                  </div>
-                  {a.gpsLat !== null && (
-                    <div style={{
-                      fontSize: '0.75rem',
-                      color: '#94a3b8',
-                      fontFamily: 'monospace',
-                      marginTop: '0.25rem',
-                    }}>
-                      📍 {a.gpsLat.toFixed(4)}, {a.gpsLon?.toFixed(4)}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <SuspectMap alerts={mapAlerts} />
-            </div>
-            <AlertPanel />
-          </>
-        )}
-        {activeTab === 'alerts' && (
-          <>
-            <Dashboard />
-            <div style={{ flex: 1 }} />
-            <AlertPanel />
-          </>
-        )}
+      {/* Main Content */}
+      <main style={{ display: 'flex', flex: 1, overflow: 'hidden', background: '#0a0e17' }}>
+        {activeTab === 'overview' && <OverviewScreen />}
+        {activeTab === 'search' && <SearchScreen />}
+        {activeTab === 'camera' && <LiveCameraScreen />}
+        {activeTab === 'map' && <MapScreen />}
+        {activeTab === 'register' && <RegisterScreen />}
+        {activeTab === 'alerts' && <AlertsScreen />}
       </main>
     </div>
   );
