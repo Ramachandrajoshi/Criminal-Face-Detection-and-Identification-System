@@ -31,6 +31,10 @@ class TokenResponse(BaseModel):
 def _validate_credentials(username: str, password: str) -> bool:
     """
     Validate credentials against stored bcrypt hash.
+
+    Raises HTTPException 500 if the stored hash looks corrupted
+    (e.g. dollar-signs were expanded by the shell because the value
+    was not quoted in the .env file).
     """
     if not settings.admin_username or not settings.admin_password_hash:
         logger.error("Admin credentials are not configured")
@@ -39,8 +43,38 @@ def _validate_credentials(username: str, password: str) -> bool:
     if username != settings.admin_username:
         return False
 
-    stored_hash = settings.admin_password_hash.encode("utf-8")
-    return bcrypt.checkpw(password.encode("utf-8"), stored_hash)
+    stored_hash = settings.admin_password_hash.strip()
+
+    # A valid bcrypt hash always starts with $2b$ (or $2a$/$2y$) and is
+    # exactly 60 characters long.  If neither is true the value was almost
+    # certainly corrupted by shell variable expansion of the $ characters.
+    if not (stored_hash.startswith(("$2b$", "$2a$", "$2y$")) and len(stored_hash) == 60):
+        logger.error(
+            "ADMIN_PASSWORD_HASH appears to be corrupted (length=%d, prefix=%r). "
+            "Make sure the value is enclosed in single-quotes in your .env file "
+            "and that it was generated with bcrypt (run: python backend/scripts/hash_password.py).",
+            len(stored_hash),
+            stored_hash[:6] if stored_hash else "",
+        )
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(
+            status_code=500,
+            detail=(
+                "Server misconfiguration: ADMIN_PASSWORD_HASH is invalid. "
+                "Ensure it is quoted in .env (single-quotes) and was generated "
+                "with bcrypt. See backend/scripts/hash_password.py."
+            ),
+        )
+
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+    except ValueError as exc:
+        logger.error("bcrypt.checkpw raised ValueError (%s) — hash may be corrupted.", exc)
+        from fastapi import HTTPException as _HTTPException
+        raise _HTTPException(
+            status_code=500,
+            detail="Server misconfiguration: bcrypt could not validate the stored password hash.",
+        ) from exc
 
 
 @router.post("/login", response_model=TokenResponse)

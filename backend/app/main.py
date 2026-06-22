@@ -28,10 +28,17 @@ async def lifespan(app: FastAPI):
 # ── App ──────────────────────────────────────────────────────────
 app = FastAPI(
     title="Criminal Face Detection System",
-    description="Decision-support platform for real-time face detection and identification",
+    description=(
+        "Decision-support platform for real-time face detection and identification.\n\n"
+        "**Authentication**: Use `POST /api/v1/login` with your admin credentials to "
+        "receive a Bearer token, then click **Authorize** above and paste the token."
+    ),
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+    swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
+    swagger_ui_parameters={"persistAuthorization": True},
     lifespan=lifespan,
 )
 
@@ -62,3 +69,35 @@ app.include_router(search.router)
 app.include_router(alerts.router)
 app.include_router(audit.router)
 app.include_router(auth.router)
+
+
+# ── OpenAPI security scheme (JWT Bearer) ─────────────────────────
+def _add_security_scheme(openapi_schema: dict) -> dict:
+    """Inject BearerAuth into the OpenAPI schema so Swagger shows a lock icon."""
+    openapi_schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    openapi_schema["components"]["securitySchemes"]["BearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Paste the token returned by POST /api/v1/login",
+    }
+    # Apply globally so every endpoint shows the lock icon by default
+    openapi_schema["security"] = [{"BearerAuth": []}]
+    return openapi_schema
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    app.openapi_schema = _add_security_scheme(schema)
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi  # type: ignore[method-assign]
