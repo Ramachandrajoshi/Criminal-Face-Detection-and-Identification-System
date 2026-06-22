@@ -1,3 +1,12 @@
+# GPU NOTE ─────────────────────────────────────────────────────────────────
+# The backend service requests GPU access via the 'deploy.resources' block.
+# For this to work the HOST machine must have:
+#   1. NVIDIA GPU drivers installed  (verify: nvidia-smi)
+#   2. NVIDIA Container Toolkit      (nvidia-docker2 / nvidia-ctk)
+#      Install: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#   3. Docker daemon restarted after toolkit install
+# Without the toolkit Docker ignores the GPU reservation silently.
+# ─────────────────────────────────────────────────────────────────────────────
 services:
   db:
     image: pgvector/pgvector:pg15
@@ -30,6 +39,11 @@ services:
       - .env
     environment:
       - PYTHONPATH=/app
+      # Master GPU switch — set ENABLE_GPU=false to force CPU-only mode
+      - ENABLE_GPU=${ENABLE_GPU:-true}
+      - GPU_MEMORY_FRACTION=${GPU_MEMORY_FRACTION:-0.8}
+      # Prevent TF from grabbing all VRAM on startup
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
     depends_on:
       db:
         condition: service_healthy
@@ -39,6 +53,16 @@ services:
       - ./backend:/app
       - /app/__pycache__
       - ./db:/app/db:ro
+    # ── GPU resource reservation ─────────────────────────────────────────────
+    # Requires NVIDIA Container Toolkit on the host (see top-of-file note).
+    # Change count: all → count: 1 to restrict to a single GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   frontend:
     build:
