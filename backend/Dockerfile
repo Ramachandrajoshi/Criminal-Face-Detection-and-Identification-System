@@ -46,6 +46,16 @@ RUN apt-get update && apt-get purge -y \
 # entire GPU VRAM on startup, allowing other processes to share the card.
 ENV TF_FORCE_GPU_ALLOW_GROWTH=true
 
+# ── CUDA / cuDNN library paths ────────────────────────────────────────────────
+# The dynamic linker must be able to find libcudnn.so.8, libcublas.so.12, etc.
+# These are the standard paths for the tensorflow/tensorflow:2.16.1-gpu image.
+# Without this, TF silently fails to dlopen the GPU libs and falls back to CPU.
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda-12.3/lib64:${LD_LIBRARY_PATH}
+
+# Suppress verbose TF/XLA C++ info logs (keep warnings and errors).
+# 0=all, 1=no INFO, 2=no INFO/WARNING, 3=no INFO/WARNING/ERROR
+ENV TF_CPP_MIN_LOG_LEVEL=1
+
 # ── Python deps ───────────────────────────────────────────────────────────────
 # tensorflow>=2.16.0 is already installed in the base image; pip will skip it
 # or upgrade in-place if requirements.txt specifies a newer patch.
