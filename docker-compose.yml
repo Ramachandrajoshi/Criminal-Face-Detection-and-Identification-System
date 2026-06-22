@@ -44,6 +44,10 @@ services:
       - GPU_MEMORY_FRACTION=${GPU_MEMORY_FRACTION:-0.8}
       # Prevent TF from grabbing all VRAM on startup
       - TF_FORCE_GPU_ALLOW_GROWTH=true
+      # Expose only the second physical GPU (0-indexed) to this container.
+      # GPU 0 → first card, GPU 1 → second card.
+      # Change to 0 to use the first GPU, or remove to expose all GPUs.
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-1}
     depends_on:
       db:
         condition: service_healthy
@@ -55,13 +59,22 @@ services:
       - ./db:/app/db:ro
     # ── GPU resource reservation ─────────────────────────────────────────────
     # Requires NVIDIA Container Toolkit on the host (see top-of-file note).
-    # Change count: all → count: 1 to restrict to a single GPU.
+    #
+    # device_ids selects GPUs by their host index (0-based).
+    # '1' = second physical GPU (NVIDIA L40S at Bus 00:11.0 in this setup).
+    #
+    # To switch GPUs:
+    #   Second GPU only  → device_ids: ['1']   ← current
+    #   First GPU only   → device_ids: ['0']
+    #   Both GPUs        → remove device_ids, use: count: all
+    #
+    # NOTE: count and device_ids are mutually exclusive — never use both.
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ['1']
               capabilities: [gpu]
 
   frontend:
