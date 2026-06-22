@@ -35,6 +35,12 @@ from app.db.vector_ops import compute_query_hash
 logger = logging.getLogger(__name__)
 
 
+# Minimum detector confidence to accept a bounding box as a real face.
+# Detections below this threshold are treated as "no face found".
+# Tune this in config if the primary detector is too aggressive.
+_MIN_FACE_CONFIDENCE = 0.70
+
+
 # ---------- Stage 1: DETECT ----------
 def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
     """
@@ -42,6 +48,20 @@ def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
     Returns aligned numpy array (RGB) or None if no face found.
 
     Detector priority (AGENTS.md §5): retinaface → mtcnn → opencv.
+
+    enforce_detection=True
+    ----------------------
+    DeepFace raises ``ValueError`` when no face bounding box meets the
+    detector's internal threshold.  We catch that specifically so we can
+    silently fall through to the next backend.  Only non-ValueError
+    exceptions (driver failures, OOM, etc.) are logged as warnings.
+
+    Confidence filter
+    -----------------
+    Even with enforce_detection=True some detectors return very low-
+    confidence boxes on flag icons, logos, or blurry thumbnails.  We
+    discard any detection whose confidence is below ``_MIN_FACE_CONFIDENCE``
+    (0.70) as an extra guard, then try the next backend.
     """
     import cv2
 
@@ -58,20 +78,110 @@ def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
             faces = DeepFace.extract_faces(
                 img_path=frame,
                 detector_backend=backend,
-                enforce_detection=False,
+                enforce_detection=True,   # raises ValueError if no face found
                 align=True,
             )
-            if faces:
-                return faces[0]["face"]
-        except Exception as exc:
-            logger.warning("Detector %s failed: %s — trying next backend", backend, exc)
 
-    logger.warning("No face detected in frame after all fallbacks")
+            # Filter out low-confidence bounding boxes (e.g. flag icons, logos).
+            confident_faces = [
+                f for f in faces
+                if f.get("confidence", 1.0) >= _MIN_FACE_CONFIDENCE
+            ]
+
+            if confident_faces:
+                # Return the largest face by bounding-box area.
+                best = max(
+                    confident_faces,
+                    key=lambda f: (
+                        f.get("facial_area", {}).get("w", 0)
+                        * f.get("facial_area", {}).get("h", 0)
+                    ),
+                )
+                logger.debug(
+                    "Face detected by %s — confidence=%.2f, area=%dx%d",
+                    backend,
+                    best.get("confidence", 0),
+                    best.get("facial_area", {}).get("w", 0),
+                    best.get("facial_area", {}).get("h", 0),
+                )
+                return best["face"]
+
+            logger.debug(
+                "Backend %s found %d face(s) but all below confidence threshold %.2f — trying next",
+                backend, len(faces), _MIN_FACE_CONFIDENCE,
+            )
+
+        except ValueError:
+            # DeepFace raises ValueError("Face could not be detected ...") when
+            # no face bounding box is found with enforce_detection=True.
+            # This is the expected path for images without faces — not an error.
+            logger.debug("No face bounding box found by detector '%s' — trying next", backend)
+        except Exception as exc:
+            # Real driver / model failures (e.g. OOM, missing weights).
+            logger.warning("Detector '%s' errored: %s — trying next backend", backend, exc)
+
+    logger.warning(
+        "No face detected in image after trying all detector backends %s. "
+        "Image will be marked as FAILED.",
+        [settings.deepface_detector, "mtcnn", "opencv"],
+    )
     return None
 
 
 # ---------- Stage 2-3: ALIGN + NORMALIZE ----------
-# Handled internally by DeepFace.extract_faces(align=True).
+
+def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
+    """
+    Prepare an aligned face array for ArcFace embedding extraction.
+
+    Input contract
+    --------------
+    ``face`` is the array returned by ``DeepFace.extract_faces(align=True)``.
+    DeepFace stores it as **float32 in [0, 1]** (it divided by 255 internally).
+    ArcFace's training normalization is:
+
+        pixel_norm = (pixel_uint8 − 127.5) / 128
+
+    which expects **uint8 [0, 255]** values.  Without this conversion the
+    model receives near-zero inputs (÷255 twice → [0, 0.004]) that are far
+    outside the training distribution — the main cause of inflated
+    same-person cosine distances.
+
+    Steps
+    -----
+    1. uint8 conversion  — restore [0, 255] uint8 if input is float.
+    2. Lanczos resize    — 112 × 112 (ArcFace canonical size) at highest
+                          interpolation quality.
+    3. CLAHE             — Contrast Limited Adaptive Histogram Equalization
+                          applied to the L* channel in LAB color space.
+                          This normalises per-image illumination without
+                          altering hue or saturation, tightening same-person
+                          embedding variance across different lighting conditions.
+    """
+    import cv2
+
+    # Step 1: uint8 conversion
+    if face.dtype != np.uint8:
+        face = (face * 255.0).clip(0, 255).astype(np.uint8)
+
+    # Step 2: resize to ArcFace canonical 112 × 112
+    if face.shape[:2] != (112, 112):
+        face = cv2.resize(face, (112, 112), interpolation=cv2.INTER_LANCZOS4)
+
+    # Step 3: CLAHE illumination normalisation (LAB color space, L channel only)
+    if settings.enable_clahe:
+        # The face array from DeepFace is RGB; OpenCV's cvtColor expects BGR.
+        face_bgr = cv2.cvtColor(face, cv2.COLOR_RGB2BGR)
+        face_lab = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2LAB)
+        clahe = cv2.createCLAHE(
+            clipLimit=settings.clahe_clip_limit,
+            tileGridSize=(8, 8),
+        )
+        face_lab[:, :, 0] = clahe.apply(face_lab[:, :, 0])
+        face_bgr = cv2.cvtColor(face_lab, cv2.COLOR_LAB2BGR)
+        face = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
+
+    return face
 
 
 # ---------- Stage 4: REPRESENT ----------
@@ -79,15 +189,29 @@ def extract_embedding(aligned_face: np.ndarray) -> Optional[np.ndarray]:
     """
     Extract a 512-d ArcFace embedding from an aligned face image.
     Returns L2-normalised numpy array or None on failure.
+
+    Normalization note
+    ------------------
+    DeepFace.represent's ``normalization`` parameter must be set to
+    ``"ArcFace"`` (i.e. ``(pixel − 127.5) / 128``) to match what the
+    InsightFace/ArcFace backbone was trained with.  The DeepFace default
+    (``"base"`` = pixel / 255) is correct only for VGGFace, NOT for ArcFace.
+    Passing the wrong normalization produces embeddings that are statistically
+    valid but not aligned with the model weights, increasing intra-class
+    variance (= higher same-person distance).
     """
     from deepface import DeepFace
 
+    # Run Stage 2-3 preprocessing before handing off to the ArcFace model.
+    face = _preprocess_for_arcface(aligned_face)
+
     try:
         result = DeepFace.represent(
-            img_path=aligned_face,
+            img_path=face,
             model_name=settings.deepface_model,
-            detector_backend="skip",
+            detector_backend="skip",       # already aligned + preprocessed
             enforce_detection=False,
+            normalization=settings.arcface_normalization,   # "ArcFace" = (x-127.5)/128
         )
     except Exception as exc:
         logger.error("Embedding extraction failed: %s", exc)
@@ -99,7 +223,9 @@ def extract_embedding(aligned_face: np.ndarray) -> Optional[np.ndarray]:
 
     embedding = np.array(result[0]["embedding"], dtype=np.float32)
 
-    # L2 normalise (Stage 3 normalisation — AGENTS.md §3)
+    # L2 normalise for cosine distance (AGENTS.md §3)
+    # DeepFace may already L2-normalise depending on the model; re-normalising
+    # is idempotent and guarantees unit-norm vectors for pgvector cosine ops.
     norm = np.linalg.norm(embedding)
     if norm > 0:
         embedding = embedding / norm
