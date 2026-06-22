@@ -25,6 +25,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Remove system Python packages that conflict with pip ─────────────────────
+# The TF base image pre-installs several packages via apt/distutils
+# (blinker, Flask, Werkzeug, …).  pip cannot uninstall distutils-managed
+# packages, so it fails with "Cannot uninstall blinker 1.4".
+# We purge them here so pip can install the correct versions cleanly.
+RUN apt-get update && apt-get purge -y \
+    python3-blinker \
+    python3-flask \
+    python3-werkzeug \
+    python3-click \
+    python3-itsdangerous \
+    python3-jinja2 \
+    2>/dev/null || true \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── TensorFlow GPU memory growth (overridable via env) ────────────────────────
 # TF_FORCE_GPU_ALLOW_GROWTH=true prevents TensorFlow from pre-allocating the
 # entire GPU VRAM on startup, allowing other processes to share the card.
