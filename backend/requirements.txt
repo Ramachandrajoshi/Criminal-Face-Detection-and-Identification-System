@@ -15,7 +15,7 @@ deepface>=0.0.100
 # cuDNN 9 via the nvidia-cudnn-cu12 Python package, which is not present in
 # the base image, causing "Cannot dlopen some GPU libraries" at runtime.
 tensorflow==2.16.1
-tf-keras==2.16.1
+tf-keras==2.16.0
 opencv-python>=4.9.0
 numpy>=1.24.0
 pillow>=10.2.0
