@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     gpu_memory_fraction: float = 0.8
 
     # CORS (allow frontend dev server)
-    allowed_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    allowed_origins: list[str] = ["*"]
 
 
 settings = Settings()
