@@ -33,12 +33,12 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
-from app.core.pipeline import register_pipeline
+from app.core.pipeline import reenroll_pipeline, register_pipeline
 from app.core.validation import validate_image_dimensions
 from app.db.models import SuspectProfile as SuspectProfileModel
 from app.db.session import async_session_factory, get_session
 from app.db.vector_ops import add_audit_entry, compute_query_hash
-from app.schemas.face import RegisterResponse, SuspectProfileOut, SuspectUpdateIn
+from app.schemas.face import ReenrollResponse, RegisterResponse, SuspectProfileOut, SuspectUpdateIn
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +576,70 @@ async def delete_suspect(
     )
     await session.commit()
     # 204 No Content
+
+
+# ── Face Re-enrolment ───────────────────────────────────────────
+
+
+@router.put("/suspects/{suspect_id}/face", response_model=ReenrollResponse)
+async def reenroll_suspect_face(
+    suspect_id: int,
+    file: UploadFile = File(..., description="New face image (JPEG/PNG, ≤ 5 MB)"),
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+):
+    """
+    Re-enrol a suspect's face — replace the stored 512-d ArcFace embedding
+    with one freshly extracted from the uploaded image.
+
+    Only the ``face_embedding`` and ``face_embedding_enc`` columns are
+    updated; all metadata (name, alias, demographics) is left untouched.
+    No raw image is persisted (AGENTS.md §9 — no raw image storage).
+
+    A ``REGISTER_REENROLL`` event is written to the append-only audit log
+    so operators have a full trail of every embedding replacement.
+
+    Possible response statuses
+    --------------------------
+    ``RE_ENROLLED``  — embedding updated successfully.
+    ``ERROR``        — face detection, extraction, or DB update failed;
+                       the existing embedding is left unchanged.
+    """
+    # ── Validate image ────────────────────────────────────────────
+    content, err = await _validate_file(file)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+
+    # ── Confirm suspect exists ────────────────────────────────────
+    row = await session.execute(
+        select(
+            SuspectProfileModel.id,
+            SuspectProfileModel.suspect_name,
+        ).where(SuspectProfileModel.id == suspect_id)
+    )
+    suspect_row = row.one_or_none()
+    if not suspect_row:
+        raise HTTPException(status_code=404, detail="Suspect not found")
+
+    suspect_name: str = suspect_row.suspect_name
+
+    # ── Re-enrol (stages 1-4 + DB update) ────────────────────────
+    file.file.seek(0)
+    result = await reenroll_pipeline(file, session, suspect_id, suspect_name)
+
+    if result["status"] == "ERROR":
+        raise HTTPException(status_code=422, detail=result.get("error", "Re-enrolment failed"))
+
+    from datetime import datetime, timezone
+    updated_at = datetime.now(timezone.utc).isoformat()
+
+    return ReenrollResponse(
+        status=result["status"],
+        profile_id=result["profile_id"],
+        query_hash=result["query_hash"],
+        embedding_dim=result.get("embedding_dim"),
+        updated_at=updated_at,
+    )
 
 
 # ── Suspect Test Image Retrieval ─────────────────────────────────

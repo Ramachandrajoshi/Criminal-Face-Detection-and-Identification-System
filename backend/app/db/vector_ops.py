@@ -120,6 +120,51 @@ async def register_profile(
     return int(result.scalar_one())
 
 
+async def update_face_embedding(
+    session,
+    suspect_id: int,
+    embedding: "np.ndarray | list[float]",
+) -> bool:
+    """
+    Replace the face_embedding (pgvector column) and face_embedding_enc
+    (AES-256 encrypted payload) for an existing suspect profile.
+
+    Returns True when a row was updated, False when suspect_id was not found.
+    Raises on database errors (caller is responsible for rollback).
+    """
+    vector = np.asarray(embedding, dtype=np.float32)
+    vec_str = f"[{','.join(f'{v:.10f}' for v in vector.tolist())}]"
+    encrypted = encrypt_embedding_vector(vector)
+
+    sql = text(
+        """
+        UPDATE suspect_profiles
+        SET face_embedding     = CAST(:vec AS vector),
+            face_embedding_enc = :enc
+        WHERE id = :suspect_id
+        RETURNING id
+        """
+    )
+
+    result = await session.execute(
+        sql,
+        {
+            "suspect_id": suspect_id,
+            "vec": vec_str,
+            "enc": encrypted,
+        },
+    )
+    row = result.fetchone()
+
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
+    return row is not None
+
+
 async def add_audit_entry(
     session,
     event_type: str,

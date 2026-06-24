@@ -68,6 +68,16 @@ class RegisterResponse(_BaseCamel):
     error: Optional[str] = None
 
 
+class ReenrollResponse(_BaseCamel):
+    """Response for PUT /suspects/{suspect_id}/face (face re-enrolment)."""
+    status: str              # "RE_ENROLLED" | "ERROR"
+    profile_id: int
+    query_hash: str          # SHA-256 of the new embedding bytes
+    embedding_dim: Optional[int] = None
+    updated_at: str          # ISO-8601 timestamp of the update
+    error: Optional[str] = None
+
+
 class AlertResponse(_BaseCamel):
     id: int
     audit_log_id: Optional[int] = None
