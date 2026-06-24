@@ -405,3 +405,56 @@ async def register_pipeline(
         "query_hash": query_hash,
         "embedding_dim": int(embedding.shape[0]),
     }
+
+
+# ---------- Re-enrolment Pipeline ----------
+async def reenroll_pipeline(
+    file: UploadFile,
+    session,
+    suspect_id: int,
+    suspect_name: str,
+) -> dict:
+    """
+    Re-enrol an existing suspect: stages 1–4 then UPDATE the stored embedding.
+
+    No liveness check is performed (same rationale as register_pipeline —
+    re-enrolment always uses uploaded mugshots / ID photos, not live captures).
+
+    Returns a dict with keys:
+      status        — "RE_ENROLLED" | "ERROR"
+      profile_id    — the suspect's existing DB id
+      query_hash    — SHA-256 of the *new* embedding bytes
+      embedding_dim — 512 for ArcFace
+    """
+    content = await file.read()
+
+    # Stage 1: Detect
+    aligned = detect_face(content)
+    if aligned is None:
+        return {"status": "ERROR", "error": "No face detected in the uploaded image"}
+
+    # Stage 4: Represent
+    embedding = extract_embedding(aligned)
+    if embedding is None:
+        return {"status": "ERROR", "error": "Embedding extraction failed"}
+
+    from app.db.vector_ops import add_audit_entry, update_face_embedding
+
+    updated = await update_face_embedding(session, suspect_id, embedding)
+    if not updated:
+        return {"status": "ERROR", "error": f"Suspect {suspect_id} not found in database"}
+
+    query_hash = compute_query_hash(embedding.tobytes())
+    await add_audit_entry(
+        session,
+        event_type="REGISTER_REENROLL",
+        query_hash=query_hash,
+        result_name=suspect_name,   # no raw PII, just name tag for audit trail
+    )
+
+    return {
+        "status": "RE_ENROLLED",
+        "profile_id": suspect_id,
+        "query_hash": query_hash,
+        "embedding_dim": int(embedding.shape[0]),
+    }
