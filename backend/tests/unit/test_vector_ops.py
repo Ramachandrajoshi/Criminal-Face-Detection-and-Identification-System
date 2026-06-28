@@ -6,12 +6,10 @@ Covers:
 - cosine_ann_query: empty results, matches under threshold, threshold filtering
 - register_profile: insert + commit
 - add_audit_entry: insert only
-- update_alert_status: status update with confirmation
 - SQL uses cosine distance (not similarity)
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone
 
 import numpy as np
 import pytest
@@ -89,9 +87,9 @@ class TestCosineANNQuery:
         result = await cosine_ann_query(mock_session, np.ones(512).tolist(), threshold=0.6)
 
         assert len(result) == 2
-        assert result[0]["suspect_name"] == "John Doe"
+        assert result[0]["face_name"] == "John Doe"
         assert result[0]["distance"] == 0.32
-        assert result[1]["suspect_name"] == "Jane Smith"
+        assert result[1]["face_name"] == "Jane Smith"
         assert result[1]["distance"] == 0.45
 
     @pytest.mark.asyncio
@@ -359,90 +357,4 @@ class TestRegisterAndAudit:
         assert entry.gps_lon == -74.0
 
 
-class TestUpdateAlertStatus:
-    """Test update_alert_status helper."""
 
-    @pytest.mark.asyncio
-    async def test_update_confirms_alert(self):
-        """Confirming an alert sets status to CONFIRMED."""
-        mock_session = AsyncMock()
-
-        class Row:
-            def __init__(self, vals):
-                self._vals = vals
-            def __getitem__(self, key):
-                return self._vals[key]
-
-        class MockResult:
-            def __init__(self, row):
-                self._row = row
-            def fetchone(self):
-                return self._row
-
-        mock_session.execute = AsyncMock(return_value=MockResult(Row([1, "CONFIRMED"])))
-
-        from app.db.vector_ops import update_alert_status
-        result = await update_alert_status(mock_session, 1, "CONFIRMED", datetime.now(timezone.utc))
-
-        assert result == 1
-
-    @pytest.mark.asyncio
-    async def test_update_dismisses_alert(self):
-        """Dismissing an alert sets status to DISMISSED."""
-        mock_session = AsyncMock()
-
-        class Row:
-            def __init__(self, vals):
-                self._vals = vals
-            def __getitem__(self, key):
-                return self._vals[key]
-
-        class MockResult:
-            def __init__(self, row):
-                self._row = row
-            def fetchone(self):
-                return self._row
-
-        mock_session.execute = AsyncMock(return_value=MockResult(Row([1, "DISMISSED"])))
-
-        from app.db.vector_ops import update_alert_status
-        result = await update_alert_status(mock_session, 2, "DISMISSED")
-
-        # Returns the row id from RETURNING clause
-        assert result == 1
-
-    @pytest.mark.asyncio
-    async def test_update_nonexistent_returns_none(self):
-        """Updating a non-existent alert returns None."""
-        mock_session = AsyncMock()
-
-        class MockResult:
-            def fetchone(self):
-                return None
-
-        mock_session.execute = AsyncMock(return_value=MockResult())
-
-        from app.db.vector_ops import update_alert_status
-        result = await update_alert_status(mock_session, 99999, "CONFIRMED")
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_update_commits_session(self):
-        """update_alert_status should call commit."""
-        mock_session = AsyncMock()
-        mock_session.commit = AsyncMock()
-
-        class Row:
-            def __getitem__(self, key):
-                return None
-        class MockResult:
-            def fetchone(self):
-                return None
-
-        mock_session.execute = AsyncMock(return_value=MockResult())
-
-        from app.db.vector_ops import update_alert_status
-        await update_alert_status(mock_session, 1, "CONFIRMED")
-
-        mock_session.commit.assert_awaited()

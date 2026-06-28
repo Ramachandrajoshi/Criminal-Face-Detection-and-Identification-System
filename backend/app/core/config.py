@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     jwt_expiry_hours: int = 8
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    default_tenant_id: int = 1
 
     # Admin login (hashed password)
     admin_username: Optional[str] = None
@@ -56,9 +57,6 @@ class Settings(BaseSettings):
     # Set ENABLE_GPU=false in .env to force CPU-only mode (e.g. on machines
     # without a CUDA-capable GPU or NVIDIA Container Toolkit).
     enable_gpu: bool = True
-    # Fraction of GPU VRAM TensorFlow may allocate (0.0–1.0).
-    # Leave headroom for the OS and other processes.
-    gpu_memory_fraction: float = 0.8
 
     # CORS (allow frontend dev server)
     allowed_origins: list[str] = ["*"]

@@ -4,7 +4,6 @@ Handles AES-256 decryption of stored embeddings before cosine similarity search.
 """
 
 import hashlib
-from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -24,6 +23,7 @@ async def cosine_ann_query(
     query_vector: list[float] | bytes,
     threshold: Optional[float] = None,
     limit: int = 10,
+    tenant_id: int = 1,
 ) -> list[dict]:
     """
     Perform approximate nearest-neighbour cosine similarity search
@@ -32,10 +32,12 @@ async def cosine_ann_query(
     Uses the pgvector `<=>` operator which returns COSINE DISTANCE
     (0 = identical, 2 = opposite). Lower distance = better match.
 
-    Returns a list of dicts: {id, suspect_name, alias, distance, ...}
+    Returns a list of dicts: {id, person_name, alias, distance, ...}
     sorted by ascending distance (closest match first).
 
     threshold defaults to MATCH_THRESHOLD from config.
+    tenant_id filters results to the requesting tenant (defense in depth
+    alongside PostgreSQL RLS).
     """
     threshold = threshold if threshold is not None else settings.match_threshold
 
@@ -46,16 +48,17 @@ async def cosine_ann_query(
     vec_str = f"[{','.join(f'{v:.10f}' for v in query_vector)}]"
 
     # Cosine distance via <=> operator (lower is better match)
-    # Filter: distance <= threshold (e.g., 0.58)
+    # Filter: distance <= threshold (e.g., 0.58) AND tenant_id match
     sql = text(
         """
         SELECT
             id,
-            suspect_name,
+            face_name,
             alias,
             (face_embedding <=> :vec) AS distance
-        FROM suspect_profiles
+        FROM face_profiles
         WHERE (face_embedding <=> :vec) <= :threshold
+          AND tenant_id = :tenant_id
         ORDER BY distance ASC
         LIMIT :limit
         """
@@ -63,16 +66,17 @@ async def cosine_ann_query(
 
     result = await session.execute(
         sql,
-        {"vec": vec_str, "threshold": threshold, "limit": limit},
+        {"vec": vec_str, "threshold": threshold, "limit": limit, "tenant_id": tenant_id},
     )
 
     rows = []
     for row in result:
         rows.append({
             "id": row[0],
-            "suspect_name": row[1],
+            "face_name": row[1],
             "alias": row[2],
             "distance": round(float(row[3]), 6),
+            "tenant_id": tenant_id,
         })
 
     return rows
@@ -80,13 +84,14 @@ async def cosine_ann_query(
 
 async def register_profile(
     session,
-    suspect_name: str,
+    person_name: str,
     alias: Optional[str],
     demographics: Optional[dict],
     embedding: np.ndarray | list[float],
+    tenant_id: int = 1,
 ) -> int:
     """
-    Insert a new suspect profile.
+    Insert a new face profile.
     Embeddings are stored as pgvector plus AES-256 encrypted payload at rest.
     """
     vector = np.asarray(embedding, dtype=np.float32)
@@ -95,8 +100,8 @@ async def register_profile(
 
     sql = text(
         """
-        INSERT INTO suspect_profiles (suspect_name, alias, demographics, face_embedding, face_embedding_enc)
-        VALUES (:suspect_name, :alias, :demographics, CAST(:vec AS vector), :enc)
+        INSERT INTO face_profiles (face_name, alias, demographics, face_embedding, face_embedding_enc, tenant_id)
+        VALUES (:face_name, :alias, :demographics, CAST(:vec AS vector), :enc, :tenant_id)
         RETURNING id
         """
     )
@@ -104,11 +109,12 @@ async def register_profile(
     result = await session.execute(
         sql,
         {
-            "suspect_name": suspect_name,
+            "face_name": person_name,
             "alias": alias,
             "demographics": demographics,
             "vec": vec_str,
             "enc": encrypted,
+            "tenant_id": tenant_id,
         },
     )
 
@@ -122,14 +128,15 @@ async def register_profile(
 
 async def update_face_embedding(
     session,
-    suspect_id: int,
+    face_id: int,
     embedding: "np.ndarray | list[float]",
+    tenant_id: int = 1,
 ) -> bool:
     """
     Replace the face_embedding (pgvector column) and face_embedding_enc
-    (AES-256 encrypted payload) for an existing suspect profile.
+    (AES-256 encrypted payload) for an existing face profile.
 
-    Returns True when a row was updated, False when suspect_id was not found.
+    Returns True when a row was updated, False when face_id was not found.
     Raises on database errors (caller is responsible for rollback).
     """
     vector = np.asarray(embedding, dtype=np.float32)
@@ -138,10 +145,10 @@ async def update_face_embedding(
 
     sql = text(
         """
-        UPDATE suspect_profiles
+        UPDATE face_profiles
         SET face_embedding     = CAST(:vec AS vector),
             face_embedding_enc = :enc
-        WHERE id = :suspect_id
+        WHERE id = :face_id AND tenant_id = :tenant_id
         RETURNING id
         """
     )
@@ -149,9 +156,10 @@ async def update_face_embedding(
     result = await session.execute(
         sql,
         {
-            "suspect_id": suspect_id,
+            "face_id": face_id,
             "vec": vec_str,
             "enc": encrypted,
+            "tenant_id": tenant_id,
         },
     )
     row = result.fetchone()
@@ -173,6 +181,7 @@ async def add_audit_entry(
     distance: Optional[float] = None,
     gps_lat: Optional[float] = None,
     gps_lon: Optional[float] = None,
+    tenant_id: int = 1,
 ) -> int:
     """Append-only: insert an audit log entry."""
     from app.db.models import AuditLog
@@ -184,6 +193,7 @@ async def add_audit_entry(
         distance=distance,
         gps_lat=gps_lat,
         gps_lon=gps_lon,
+        tenant_id=tenant_id,
     )
     session.add(entry)
     try:
@@ -198,23 +208,25 @@ async def add_audit_entry(
 async def create_alert(
     session,
     audit_log_id: int,
-    suspect_id: Optional[int],
+    face_id: Optional[int],
     event_type: str,
     distance: Optional[float],
     gps_lat: Optional[float] = None,
     gps_lon: Optional[float] = None,
+    tenant_id: int = 1,
 ) -> int:
     """Create an alert for human-in-the-loop review."""
     from app.db.models import Alert
 
     alert = Alert(
         audit_log_id=audit_log_id,
-        suspect_id=suspect_id,
+        face_id=face_id,
         event_type=event_type,
         distance=distance,
         status="PENDING_REVIEW",
         gps_lat=gps_lat,
         gps_lon=gps_lon,
+        tenant_id=tenant_id,
     )
     session.add(alert)
     try:
@@ -226,46 +238,4 @@ async def create_alert(
     return alert.id
 
 
-async def update_alert_status(
-    session,
-    alert_id: int,
-    new_status: str,
-    confirmed_at: Optional[datetime] = None,
-) -> Optional[int]:
-    """
-    Update an alert's status (PENDING_REVIEW → CONFIRMED or DISMISSED).
-    Returns the updated alert id, or None if alert not found.
-    """
-    from datetime import datetime as dt
 
-    update_sql = text(
-        """
-        UPDATE alerts
-        SET status = :status, confirmed_at = :confirmed_at
-        WHERE id = :alert_id
-        RETURNING id, status
-        """
-    )
-
-    result = await session.execute(
-        update_sql,
-        {
-            "alert_id": alert_id,
-            "status": new_status,
-            "confirmed_at": confirmed_at,
-        },
-    )
-    row = result.fetchone()
-    if row:
-        try:
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        return row[0]
-    try:
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        raise
-    return None

@@ -52,6 +52,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             user = decode_access_token(token)
             request.state.user = user
+            tenant_id = user.get("tenant", 1)
+            request.state.tenant_id = int(tenant_id)
+            # Propagate tenant_id into the async context so DB sessions
+            # (and RLS policies) use it automatically.
+            from app.db.session import set_tenant_id
+            set_tenant_id(int(tenant_id))
         except HTTPException:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,

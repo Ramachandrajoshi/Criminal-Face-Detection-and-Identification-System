@@ -25,7 +25,7 @@ class TestRegisterFlow:
         response = client.post(
             "/api/v1/register",
             files={"file": ("test.txt", b"not an image", "text/plain")},
-            data={"suspect_name": "Test"},
+            data={"face_name": "Test"},
         )
         assert response.status_code in (400, 401)
 
@@ -40,7 +40,7 @@ class TestRegisterFlow:
         response = client.post(
             "/api/v1/register",
             files={"file": ("large.jpg", buf, "image/jpeg")},
-            data={"suspect_name": "Large File Test"},
+            data={"face_name": "Large File Test"},
         )
         assert response.status_code in (400, 401)
 
@@ -53,9 +53,9 @@ class TestRegisterFlow:
 
         response = client.post(
             "/api/v1/register",
-            files={"file": ("suspect.jpg", buf, "image/jpeg")},
+            files={"file": ("face.jpg", buf, "image/jpeg")},
             data={
-                "suspect_name": "John Doe",
+                "face_name": "John Doe",
                 "alias": "JD",
                 "demographics": json.dumps({"age_band": "18-35", "gender": "M"}),
             },
@@ -69,8 +69,8 @@ class TestRegisterFlow:
             # Auth error is acceptable in test env
             assert response.status_code == 401
 
-    def test_register_requires_suspect_name(self, client):
-        """Missing suspect_name should be rejected (422 or 401)."""
+    def test_register_requires_face_name(self, client):
+        """Missing face_name should be rejected (422 or 401)."""
         img = Image.new("RGB", (112, 112), color="blue")
         buf = io.BytesIO()
         img.save(buf, format="JPEG")
@@ -78,7 +78,7 @@ class TestRegisterFlow:
 
         response = client.post(
             "/api/v1/register",
-            files={"file": ("suspect.jpg", buf, "image/jpeg")},
+            files={"file": ("face.jpg", buf, "image/jpeg")},
             data={},
         )
         assert response.status_code in (401, 422)
@@ -92,9 +92,9 @@ class TestRegisterFlow:
 
         response = client.post(
             "/api/v1/register",
-            files={"file": ("suspect.jpg", buf, "image/jpeg")},
+            files={"file": ("face.jpg", buf, "image/jpeg")},
             data={
-                "suspect_name": "Bad JSON",
+                "face_name": "Bad JSON",
                 "demographics": "{invalid json",
             },
         )

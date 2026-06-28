@@ -10,17 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # ---------- Request Schemas ----------
 
-class RegisterRequest(BaseModel):
-    suspect_name: str = Field(..., min_length=1, max_length=100, description="Suspect full name")
-    alias: Optional[str] = Field(None, max_length=100, description="Known alias")
-    demographics: Optional[dict] = Field(None, description="Age band, gender, ethnicity")
-
-
-class SearchRequest(BaseModel):
-    gps_lat: Optional[float] = Field(None, ge=-90, le=90, description="GPS latitude of capture")
-    gps_lon: Optional[float] = Field(None, ge=-180, le=180, description="GPS longitude of capture")
-
-
 class ConfirmRequest(BaseModel):
     confirmed: bool = Field(..., description="True = CONFIRMED, False = DISMISSED")
 
@@ -45,9 +34,10 @@ class _BaseCamel(BaseModel):
 
 class MatchResult(_BaseCamel):
     id: int
-    suspect_name: str
+    face_name: str
     alias: Optional[str] = None
     distance: float
+    tenant_id: int = 1
 
 
 class SearchResponse(_BaseCamel):
@@ -66,10 +56,11 @@ class RegisterResponse(_BaseCamel):
     query_hash: str
     embedding_dim: Optional[int] = None
     error: Optional[str] = None
+    tenant_id: int = 1
 
 
 class ReenrollResponse(_BaseCamel):
-    """Response for PUT /suspects/{suspect_id}/face (face re-enrolment)."""
+    """Response for PUT /faces/{face_id}/face (face re-enrolment)."""
     status: str              # "RE_ENROLLED" | "ERROR"
     profile_id: int
     query_hash: str          # SHA-256 of the new embedding bytes
@@ -81,9 +72,9 @@ class ReenrollResponse(_BaseCamel):
 class AlertResponse(_BaseCamel):
     id: int
     audit_log_id: Optional[int] = None
-    suspect_id: Optional[int] = None
-    suspect_name: Optional[str] = None
-    suspect_alias: Optional[str] = None
+    face_id: Optional[int] = None
+    face_name: Optional[str] = None
+    face_alias: Optional[str] = None
     event_type: str
     distance: Optional[float] = None
     status: str  # "PENDING_REVIEW" | "CONFIRMED" | "DISMISSED"
@@ -91,6 +82,7 @@ class AlertResponse(_BaseCamel):
     gps_lon: Optional[float] = None
     created_at: str
     confirmed_at: Optional[str] = None
+    tenant_id: int = 1
 
 
 class AuditEntryResponse(_BaseCamel):
@@ -102,6 +94,7 @@ class AuditEntryResponse(_BaseCamel):
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
     timestamp: str
+    tenant_id: int = 1
 
 
 class HealthResponse(BaseModel):
@@ -111,27 +104,18 @@ class HealthResponse(BaseModel):
 
 class SuspectProfileOut(_BaseCamel):
     id: int
-    suspect_name: str
+    face_name: str
     alias: Optional[str] = None
     demographics: Optional[dict] = None
     created_at: str   # ISO-8601 string
+    tenant_id: int = 1
 
 
 class SuspectUpdateIn(BaseModel):
-    suspect_name: Optional[str] = Field(None, max_length=100)
+    face_name: Optional[str] = Field(None, max_length=100)
     alias: Optional[str] = Field(None, max_length=100)
     demographics: Optional[dict] = None
+    tenant_id: Optional[int] = None
 
 
-class BatchSearchProgressEvent(_BaseCamel):
-    type: str               # "start" | "progress" | "done"
-    processed: int = 0
-    total: int = 0
-    filename: Optional[str] = None
-    status: Optional[str] = None      # MATCH | NO_MATCH | SPOOF_BLOCKED | ERROR
-    query_hash: Optional[str] = None
-    matches: list[MatchResult] = []
-    alert_id: Optional[int] = None
-    elapsed_ms: int = 0
-    file_ms: Optional[int] = None
-    error: Optional[str] = None
+

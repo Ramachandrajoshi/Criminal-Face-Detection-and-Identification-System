@@ -2,12 +2,12 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   registerFace,
   registerFacesBatchStream,
-  getSuspects,
-  updateSuspect,
-  deleteSuspect,
+  getFaces,
+  updateFace,
+  deleteFace,
 } from '../../api/client';
 import type { SseEvent, SseProgressEvent, SseDoneEvent } from '../../api/client';
-import type { SuspectProfile } from '../../types';
+import type { FaceProfile } from '../../types';
 import { storeSuspectImage } from '../../utils/db';
 import SuspectImage from '../SuspectImage';
 
@@ -29,7 +29,7 @@ interface FileEntry {
 
 interface ProgressEntry {
   filename: string;
-  suspectName: string;
+  faceName: string;
   status: 'pending' | 'processing' | 'REGISTERED' | 'ERROR' | 'SPOOF_BLOCKED';
   fileMs?: number;
   error?: string;
@@ -50,7 +50,7 @@ interface BatchProgress {
 
 export default function RegisterScreen(): JSX.Element {
   // Roster state
-  const [roster, setRoster] = useState<SuspectProfile[]>([]);
+  const [roster, setRoster] = useState<FaceProfile[]>([]);
   const [loadingRoster, setLoadingRoster] = useState(true);
   const [rosterError, setRosterError] = useState<string | null>(null);
 
@@ -75,7 +75,7 @@ export default function RegisterScreen(): JSX.Element {
     setLoadingRoster(true);
     setRosterError(null);
     try {
-      const data = await getSuspects();
+      const data = await getFaces();
       setRoster(data);
     } catch (err: unknown) {
       setRosterError(err instanceof Error ? err.message : 'Failed to fetch roster');
@@ -132,7 +132,7 @@ export default function RegisterScreen(): JSX.Element {
 
     const initialEntries: ProgressEntry[] = files.map((f) => ({
       filename: f.file.name,
-      suspectName: f.name.trim() || nameFromFilename(f.file.name),
+      faceName: f.name.trim() || nameFromFilename(f.file.name),
       status: 'pending',
     }));
 
@@ -173,7 +173,7 @@ export default function RegisterScreen(): JSX.Element {
 
       const formData = new FormData();
       formData.append('file', entry.file);
-      formData.append('suspect_name', entry.name.trim() || nameFromFilename(entry.file.name));
+      formData.append('person_name', entry.name.trim() || nameFromFilename(entry.file.name));
       if (alias.trim()) formData.append('alias', alias.trim());
       if (description.trim()) {
         formData.append('demographics', JSON.stringify({ description: description.trim() }));
@@ -345,15 +345,15 @@ export default function RegisterScreen(): JSX.Element {
   }, []);
 
   // CRUD actions
-  const startEdit = (suspect: SuspectProfile) => {
-    setEditingId(suspect.id);
-    setEditName(suspect.suspectName);
-    setEditAlias(suspect.alias ?? '');
+  const startEdit = (profile: FaceProfile) => {
+    setEditingId(profile.id);
+    setEditName(profile.faceName);
+    setEditAlias(profile.alias ?? '');
   };
 
   const saveEdit = async (id: number) => {
     try {
-      await updateSuspect(id, { suspectName: editName, alias: editAlias });
+      await updateFace(id, { faceName: editName, alias: editAlias });
       setEditingId(null);
       void fetchRoster();
     } catch (err: unknown) {
@@ -362,11 +362,11 @@ export default function RegisterScreen(): JSX.Element {
   };
 
   const handleDelete = async (id: number) => {
-    if (!window.confirm('Are you sure you want to delete this suspect profile? This is append-only audit logged.')) {
+    if (!window.confirm('Are you sure you want to delete this face profile? This is append-only audit logged.')) {
       return;
     }
     try {
-      await deleteSuspect(id);
+      await deleteFace(id);
       void fetchRoster();
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : 'Delete failed');
@@ -522,8 +522,8 @@ export default function RegisterScreen(): JSX.Element {
                         />
                       ) : (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <SuspectImage name={s.suspectName} style={{ width: '28px', height: '28px' }} />
-                          <span>{s.suspectName}</span>
+                          <SuspectImage name={s.faceName} style={{ width: '28px', height: '28px' }} />
+                          <span>{s.faceName}</span>
                         </div>
                       )}
                     </td>

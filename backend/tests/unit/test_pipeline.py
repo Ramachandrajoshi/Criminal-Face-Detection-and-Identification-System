@@ -234,7 +234,7 @@ class TestSearchPipeline:
         mock_detect = MagicMock(return_value=np.zeros((112, 112, 3), dtype=np.uint8))
         mock_extract = MagicMock(return_value=mock_embedding)
         mock_verify = AsyncMock(return_value=[
-            {"id": 1, "suspect_name": "John Doe", "alias": "JD", "distance": 0.32, "query_hash": "abc"},
+            {"id": 1, "face_name": "John Doe", "alias": "JD", "distance": 0.32, "query_hash": "abc"},
         ])
 
         with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
@@ -251,7 +251,7 @@ class TestSearchPipeline:
 
             assert result["status"] == "MATCH"
             assert len(result["matches"]) == 1
-            assert result["matches"][0]["suspect_name"] == "John Doe"
+            assert result["matches"][0]["face_name"] == "John Doe"
             assert result["matches"][0]["distance"] == 0.32
 
     @pytest.mark.asyncio
@@ -385,7 +385,7 @@ class TestSearchPipeline:
         mock_extract = MagicMock(return_value=mock_embedding)
 
         mock_ann = AsyncMock(return_value=[
-            {"id": 1, "suspect_name": "Match", "alias": None, "distance": 0.25},
+            {"id": 1, "face_name": "Match", "alias": None, "distance": 0.25},
         ])
 
         with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
@@ -410,7 +410,7 @@ class TestSearchPipeline:
         mock_detect = MagicMock(return_value=np.zeros((112, 112, 3), dtype=np.uint8))
         mock_extract = MagicMock(return_value=mock_embedding)
         mock_verify = AsyncMock(return_value=[
-            {"id": 1, "suspect_name": "Close Match", "alias": None, "distance": 0.32},
+            {"id": 1, "face_name": "Close Match", "alias": None, "distance": 0.32},
         ])
 
         with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
@@ -520,7 +520,7 @@ class TestAuthMiddlewareIntegration:
         response = client.post(
             "/api/v1/register",
             files={"file": ("test.jpg", buf, "image/jpeg")},
-            data={"suspect_name": "Test"},
+            data={"face_name": "Test"},
         )
         assert response.status_code == 401
 

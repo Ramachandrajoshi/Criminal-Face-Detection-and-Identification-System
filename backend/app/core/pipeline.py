@@ -239,6 +239,7 @@ async def verify_match(
     session,
     threshold: Optional[float] = None,
     limit: int = 10,
+    tenant_id: Optional[int] = None,
 ) -> list[dict]:
     """
     Execute pgvector cosine ANN query with the given embedding.
@@ -275,6 +276,7 @@ async def _add_spoof_audit(
     query_hash: str,
     gps_lat: Optional[float] = None,
     gps_lon: Optional[float] = None,
+    tenant_id: int = 1,
 ) -> None:
     """Append a SPOOF_BLOCKED entry to the immutable audit log."""
     from app.db.vector_ops import add_audit_entry
@@ -284,6 +286,7 @@ async def _add_spoof_audit(
         query_hash=query_hash,
         gps_lat=gps_lat,
         gps_lon=gps_lon,
+        tenant_id=tenant_id,
     )
 
 
@@ -295,6 +298,7 @@ async def run_pipeline(
     gps_lon: Optional[float] = None,
     limit: int = 10,
     enforce_liveness: bool = False,
+    tenant_id: int = 1,
 ) -> dict:
     """
     Execute the full five-stage detection pipeline on an uploaded image.
@@ -305,6 +309,8 @@ async def run_pipeline(
         Set ``True`` **only** for live camera captures.  When ``False``
         (default) the liveness check is skipped entirely so that uploaded
         photos are processed without triggering false SPOOF_BLOCKED results.
+    tenant_id:
+        Tenant scope for filtering matches and recording audit entries.
 
     Returns a dict with keys:
       status       — "MATCH" | "NO_MATCH" | "SPOOF_BLOCKED" | "ERROR"
@@ -317,7 +323,7 @@ async def run_pipeline(
     if enforce_liveness:
         if not check_liveness_on_bytes(content):
             query_hash = compute_query_hash(b"")
-            await _add_spoof_audit(session, query_hash, gps_lat=gps_lat, gps_lon=gps_lon)
+            await _add_spoof_audit(session, query_hash, gps_lat=gps_lat, gps_lon=gps_lon, tenant_id=tenant_id)
             return {
                 "status": "SPOOF_BLOCKED",
                 "matches": [],
@@ -339,7 +345,7 @@ async def run_pipeline(
     query_hash = compute_query_hash(embedding.tobytes())
 
     # ── Stage 5: Verify ───────────────────────────────────────────
-    matches = await verify_match(embedding, session, limit=limit)
+    matches = await verify_match(embedding, session, limit=limit, tenant_id=tenant_id)
 
     if matches:
         return {
@@ -348,6 +354,7 @@ async def run_pipeline(
             "query_hash": query_hash,
             "gps_lat": gps_lat,
             "gps_lon": gps_lon,
+            "tenant_id": tenant_id,
         }
     return {
         "status": "NO_MATCH",
@@ -355,6 +362,7 @@ async def run_pipeline(
         "query_hash": query_hash,
         "gps_lat": gps_lat,
         "gps_lon": gps_lon,
+        "tenant_id": tenant_id,
     }
 
 
@@ -362,12 +370,13 @@ async def run_pipeline(
 async def register_pipeline(
     file: UploadFile,
     session,
-    suspect_name: str,
+    face_name: str,
     alias: Optional[str] = None,
     demographics: Optional[dict] = None,
+    tenant_id: int = 1,
 ) -> dict:
     """
-    Register a new suspect: stages 1–4 + database insert.
+    Register a new face: stages 1–4 + database insert.
 
     **No liveness check is performed.**  Registration always uses uploaded
     photo files (mugshots, ID photos, CCTV stills) which are static images.
@@ -389,14 +398,15 @@ async def register_pipeline(
 
     from app.db.vector_ops import add_audit_entry, register_profile
 
-    profile_id = await register_profile(session, suspect_name, alias, demographics, embedding)
+    profile_id = await register_profile(session, face_name, alias, demographics, embedding, tenant_id=tenant_id)
 
     query_hash = compute_query_hash(embedding.tobytes())
     await add_audit_entry(
         session,
         event_type="REGISTER",
         query_hash=query_hash,
-        result_name=suspect_name,
+        result_name=face_name,
+        tenant_id=tenant_id,
     )
 
     return {
@@ -404,6 +414,7 @@ async def register_pipeline(
         "profile_id": profile_id,
         "query_hash": query_hash,
         "embedding_dim": int(embedding.shape[0]),
+        "tenant_id": tenant_id,
     }
 
 
@@ -411,18 +422,19 @@ async def register_pipeline(
 async def reenroll_pipeline(
     file: UploadFile,
     session,
-    suspect_id: int,
-    suspect_name: str,
+    face_id: int,
+    face_name: str,
+    tenant_id: int = 1,
 ) -> dict:
     """
-    Re-enrol an existing suspect: stages 1–4 then UPDATE the stored embedding.
+    Re-enrol an existing face: stages 1–4 then UPDATE the stored embedding.
 
     No liveness check is performed (same rationale as register_pipeline —
     re-enrolment always uses uploaded mugshots / ID photos, not live captures).
 
     Returns a dict with keys:
       status        — "RE_ENROLLED" | "ERROR"
-      profile_id    — the suspect's existing DB id
+      profile_id    — the face's existing DB id
       query_hash    — SHA-256 of the *new* embedding bytes
       embedding_dim — 512 for ArcFace
     """
@@ -440,21 +452,23 @@ async def reenroll_pipeline(
 
     from app.db.vector_ops import add_audit_entry, update_face_embedding
 
-    updated = await update_face_embedding(session, suspect_id, embedding)
+    updated = await update_face_embedding(session, face_id, embedding, tenant_id=tenant_id)
     if not updated:
-        return {"status": "ERROR", "error": f"Suspect {suspect_id} not found in database"}
+        return {"status": "ERROR", "error": f"Face {face_id} not found in database"}
 
     query_hash = compute_query_hash(embedding.tobytes())
     await add_audit_entry(
         session,
         event_type="REGISTER_REENROLL",
         query_hash=query_hash,
-        result_name=suspect_name,   # no raw PII, just name tag for audit trail
+        result_name=face_name,   # no raw PII, just name tag for audit trail
+        tenant_id=tenant_id,
     )
 
     return {
         "status": "RE_ENROLLED",
-        "profile_id": suspect_id,
+        "profile_id": face_id,
         "query_hash": query_hash,
         "embedding_dim": int(embedding.shape[0]),
+        "tenant_id": tenant_id,
     }

@@ -120,7 +120,7 @@ export default function LiveCameraScreen(): JSX.Element {
                         padding: '1rem' 
                       }}>
                         <div style={{ fontSize: '1rem', fontWeight: 700, color: '#ef4444' }}>
-                          {m.suspectName}
+                          {m.faceName}
                         </div>
                         {m.alias && (
                           <div style={{ fontSize: '0.8125rem', color: '#94a3b8', marginTop: '0.125rem' }}>

@@ -31,7 +31,7 @@ Authorization: Bearer <token>
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `file` | File | Yes | Face image (JPEG/PNG, ≤ 5 MB) |
-| `suspect_name` | string | Yes | Full name (1–100 chars) |
+| `person_name` | string | Yes | Full name (1–100 chars) |
 | `alias` | string | No | Known alias |
 | `demographics` | JSON | No | `{ "age_band": "36-60", "gender": "M", "ethnicity": "Caucasian" }` |
 
@@ -47,7 +47,7 @@ Authorization: Bearer <token>
 
 **Errors:**
 - `400` — Invalid MIME type or file > 5 MB
-- `400` — Missing suspect_name
+- `400` — Missing person_name
 - `422` — No face detected in image
 
 ---

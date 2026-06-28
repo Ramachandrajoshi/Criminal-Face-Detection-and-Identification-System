@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.middleware import AuthMiddleware
+from app.db.migrations.runner import run_migrations
+from app.db.session import async_session_factory
 
 # ── Logging ──────────────────────────────────────────────────────
 logging.basicConfig(
@@ -85,6 +87,25 @@ def _configure_gpu() -> None:
 async def lifespan(app: FastAPI):
     logger.info("Criminal Face Detection System starting on %s:%d", settings.api_host, settings.api_port)
     _configure_gpu()   # configure GPU/CPU before any TF model is loaded
+
+    # ── Run pending migrations ─────────────────────────────────────
+    try:
+        async with async_session_factory() as session:
+            summary = await run_migrations(session)
+            if summary["errors"]:
+                logger.error(
+                    "Migration errors: %s",
+                    "; ".join(e["error"] for e in summary["errors"]),
+                )
+            else:
+                logger.info(
+                    "Migrations: %d applied, %d skipped",
+                    summary["applied"],
+                    summary["skipped"],
+                )
+    except Exception as exc:
+        logger.error("Migration runner failed: %s", exc)
+
     yield
     logger.info("Criminal Face Detection System shutting down")
 

@@ -389,7 +389,7 @@ function SearchPanel({ onResult, onCameraToggle, cameraMode }: SearchPanelProps)
             <div className="match-list" style={{ marginTop: '0.75rem' }}>
               {result.matches.map((m) => (
                 <div key={m.id} className="match-item">
-                  <div className="match-name">{m.suspectName}</div>
+                  <div className="match-name">{m.faceName}</div>
                   {m.alias && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{m.alias}</div>}
                   <div className="match-distance">
                     Dist: {m.distance.toFixed(4)} / threshold: {(result.matchThreshold ?? 0.58).toFixed(2)}
@@ -525,7 +525,7 @@ function RegisterPanel() {
 
       const formData = new FormData();
       formData.append('file', entry.file);
-      formData.append('suspect_name', entry.name.trim() || nameFromFilename(entry.file.name));
+      formData.append('person_name', entry.name.trim() || nameFromFilename(entry.file.name));
       if (alias.trim()) formData.append('alias', alias.trim());
       if (description.trim()) {
         formData.append('demographics', JSON.stringify({ description: description.trim() }));

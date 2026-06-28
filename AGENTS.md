@@ -89,7 +89,9 @@ project-root/
 │   └── Dockerfile
 │
 ├── db/
-│   ├── init.sql               ← schema + HNSW index creation
+│   ├── migrations/            ← auto-applied on backend startup
+│   │   ├── 20260628000000_initial_schema_migration.py
+│   │   └── 20260628120000_unlink_alerts_suspect_migration.py
 │   └── seed_synthetic.py      ← generates 100k synthetic vector profiles
 │
 ├── notebooks/
@@ -142,17 +144,17 @@ as `MATCH_THRESHOLD` and must **never** be hard-coded elsewhere.
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE suspect_profiles (
+CREATE TABLE face_profiles (
     id               SERIAL PRIMARY KEY,
-    suspect_name     VARCHAR(100) NOT NULL,
+    face_name        VARCHAR(100) NOT NULL,
     alias            VARCHAR(100),
     demographics     JSONB,
     face_embedding   vector(512) NOT NULL,
     created_at       TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX suspect_embedding_hnsw_idx
-    ON suspect_profiles
+CREATE INDEX face_embedding_hnsw_idx
+    ON face_profiles
     USING hnsw (face_embedding vector_cosine_ops);
 
 -- Immutable audit log (INSERT only — no UPDATE or DELETE)
@@ -210,7 +212,16 @@ Response schemas live in `backend/app/schemas/face.py`.
 | Method   | Path                            | Description                                                |
 | -------- | ------------------------------- | ---------------------------------------------------------- |
 | `POST` | `/api/v1/register`            | Upload image + metadata; extract & store embedding         |
+| `POST` | `/api/v1/register/batch`      | Batch register multiple images                             |
+| `POST` | `/api/v1/register/batch/stream` | Batch register with SSE progress                         |
 | `POST` | `/api/v1/search`              | Upload query image; run pipeline; return match or NO_MATCH |
+| `POST` | `/api/v1/search/batch/stream` | Batch search with SSE progress                             |
+| `GET`  | `/api/v1/faces`               | List all registered face profiles                          |
+| `GET`  | `/api/v1/faces/{face_id}`     | Get single face profile by ID                              |
+| `PATCH` | `/api/v1/faces/{face_id}`    | Update face metadata                                       |
+| `DELETE` | `/api/v1/faces/{face_id}`   | Hard-delete face profile                                   |
+| `PUT`  | `/api/v1/faces/{face_id}/face` | Re-enrol face (replace embedding)                          |
+| `GET`  | `/api/v1/faces/image/{name}`  | Get test face image from testdata                          |
 | `GET`  | `/api/v1/alerts`              | Paginated list of recent MATCH events                      |
 | `POST` | `/api/v1/alerts/{id}/confirm` | Human operator confirms/dismisses a match                  |
 | `GET`  | `/api/v1/audit`               | Read-only audit log (admin token required)                 |

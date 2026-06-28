@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.pipeline import reenroll_pipeline, register_pipeline
 from app.core.validation import validate_image_dimensions
-from app.db.models import SuspectProfile as SuspectProfileModel
+from app.db.models import FaceProfile as FaceProfileModel
 from app.db.session import async_session_factory, get_session
 from app.db.vector_ops import add_audit_entry, compute_query_hash
 from app.schemas.face import ReenrollResponse, RegisterResponse, SuspectProfileOut, SuspectUpdateIn
@@ -53,7 +53,7 @@ MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 def _name_from_filename(filename: str) -> str:
     """
-    Derive a human-readable suspect name from an uploaded filename.
+    Derive a human-readable face name from an uploaded filename.
 
     Rules:
     1. Strip the extension.
@@ -64,7 +64,7 @@ def _name_from_filename(filename: str) -> str:
     Examples:
       "john_doe.jpg"       → "John Doe"
       "Jane-Smith-02.png"  → "Jane Smith 02"
-      "suspect123.jpeg"    → "Suspect123"
+      "face123.jpeg"       → "Face123"
     """
     stem = Path(filename).stem
     cleaned = re.sub(r"[_\-]+", " ", stem).strip()
@@ -101,24 +101,25 @@ def _sse_event(data: dict) -> str:
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=201)
-async def register_suspect(
+async def register_face(
     file: UploadFile = File(..., description="Face image (JPEG/PNG, ≤ 5 MB)"),
-    suspect_name: Optional[str] = Form(
+    face_name: Optional[str] = Form(
         None,
         max_length=100,
-        description="Suspect full name (auto-derived from filename if omitted)",
+        description="Face full name (auto-derived from filename if omitted)",
     ),
     alias: Optional[str] = Form(None, max_length=100, description="Known alias"),
     demographics: Optional[str] = Form(
         None, description="JSON demographics (age_band, gender, ethnicity)"
     ),
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
     """
-    Register a new suspect profile.
+    Register a new face profile.
 
-    - ``suspect_name`` is optional — derived from the filename when omitted.
+    - ``face_name`` is optional — derived from the filename when omitted.
     - All other metadata fields are optional.
     - The system extracts a 512-d ArcFace embedding and stores it encrypted.
     """
@@ -126,7 +127,7 @@ async def register_suspect(
     if err:
         raise HTTPException(status_code=400, detail=err)
 
-    resolved_name = (suspect_name or "").strip() or _name_from_filename(file.filename or "unknown")
+    resolved_name = (face_name or "").strip() or _name_from_filename(file.filename or "unknown")
 
     demographics_dict: Optional[dict] = None
     if demographics:
@@ -136,7 +137,7 @@ async def register_suspect(
             raise HTTPException(status_code=400, detail="Invalid demographics JSON")
 
     file.file.seek(0)
-    result = await register_pipeline(file, session, resolved_name, alias, demographics_dict)
+    result = await register_pipeline(file, session, resolved_name, alias, demographics_dict, tenant_id=tenant_id)
 
     if result["status"] in ("ERROR", "SPOOF_BLOCKED"):
         raise HTTPException(status_code=422, detail=result.get("error", result["status"]))
@@ -146,6 +147,7 @@ async def register_suspect(
         profile_id=result.get("profile_id"),
         query_hash=result["query_hash"],
         embedding_dim=result.get("embedding_dim"),
+        tenant_id=result.get("tenant_id", tenant_id),
     )
 
 
@@ -154,9 +156,10 @@ async def register_suspect(
 
 async def _register_one(
     file: UploadFile,
-    suspect_name: str,
+    face_name: str,
     alias: Optional[str],
     demographics_dict: Optional[dict],
+    tenant_id: int = 1,
 ) -> dict:
     """
     Register a single file using its own short-lived AsyncSession.
@@ -177,10 +180,10 @@ async def _register_one(
     async with async_session_factory() as session:
         try:
             return await register_pipeline(
-                file, session, suspect_name, alias, demographics_dict
+                file, session, face_name, alias, demographics_dict, tenant_id=tenant_id
             )
         except Exception as exc:
-            logger.exception("register_pipeline raised for %s", suspect_name)
+            logger.exception("register_pipeline raised for %s", face_name)
             # Best-effort rollback — ignore secondary errors.
             try:
                 await session.rollback()
@@ -196,16 +199,17 @@ async def _register_one(
 
 
 @router.post("/register/batch", status_code=201)
-async def register_suspects_batch(
+async def register_faces_batch(
     files: List[UploadFile] = File(
         ..., description="One or more face images (JPEG/PNG, each ≤ 5 MB)"
     ),
     alias: Optional[str] = Form(None, max_length=100),
     demographics: Optional[str] = Form(None),
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     _user: dict = Depends(get_current_user),
 ):
     """
-    Batch-register multiple suspects (waits for all files, returns JSON).
+    Batch-register multiple faces (waits for all files, returns JSON).
     For real-time progress streaming, use ``POST /register/batch/stream``.
 
     Note: no DI session is injected here — each file gets its own session
@@ -228,36 +232,36 @@ async def register_suspects_batch(
 
     for file in files:
         filename = file.filename or "unknown"
-        suspect_name = _name_from_filename(filename)
+        face_name = _name_from_filename(filename)
 
         content, err = await _validate_file(file)
         if err:
             results.append({
                 "filename": filename, "status": "ERROR",
-                "profileId": None, "suspectName": suspect_name, "error": err,
+                "profileId": None, "faceName": face_name, "error": err,
             })
             continue
 
         file.file.seek(0)
         try:
-            result = await _register_one(file, suspect_name, alias, demographics_dict)
+            result = await _register_one(file, face_name, alias, demographics_dict, tenant_id=tenant_id)
         except Exception as exc:  # pragma: no cover
             logger.exception("Unexpected error registering %s", filename)
             results.append({
                 "filename": filename, "status": "ERROR",
-                "profileId": None, "suspectName": suspect_name, "error": str(exc),
+                "profileId": None, "faceName": face_name, "error": str(exc),
             })
             continue
 
         if result["status"] in ("ERROR", "SPOOF_BLOCKED"):
             results.append({
                 "filename": filename, "status": result["status"],
-                "profileId": None, "suspectName": suspect_name, "error": result.get("error"),
+                "profileId": None, "faceName": face_name, "error": result.get("error"),
             })
         else:
             results.append({
                 "filename": filename, "status": "REGISTERED",
-                "profileId": result.get("profile_id"), "suspectName": suspect_name, "error": None,
+                "profileId": result.get("profile_id"), "faceName": face_name, "error": None,
             })
 
     registered = sum(1 for r in results if r["status"] == "REGISTERED")
@@ -273,12 +277,13 @@ async def register_suspects_batch(
 
 
 @router.post("/register/batch/stream")
-async def register_suspects_batch_stream(
+async def register_faces_batch_stream(
     files: List[UploadFile] = File(
         ..., description="One or more face images (JPEG/PNG, each ≤ 5 MB)"
     ),
     alias: Optional[str] = Form(None, max_length=100),
     demographics: Optional[str] = Form(None),
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     _user: dict = Depends(get_current_user),
 ):
     """
@@ -301,7 +306,7 @@ async def register_suspects_batch_stream(
       "processed":   1,
       "total":       5,
       "filename":    "john.jpg",
-      "suspectName": "John Doe",
+      "faceName":    "John Doe",
       "status":      "REGISTERED" | "ERROR" | "SPOOF_BLOCKED",
       "profileId":   42,
       "error":       null,
@@ -337,7 +342,7 @@ async def register_suspects_batch_stream(
 
         for file in files:
             filename = file.filename or "unknown"
-            suspect_name = _name_from_filename(filename)
+            face_name = _name_from_filename(filename)
             file_start = time.perf_counter()
 
             # ── Validate ─────────────────────────────────────────
@@ -350,7 +355,7 @@ async def register_suspects_batch_stream(
                     "processed": processed,
                     "total": total,
                     "filename": filename,
-                    "suspectName": suspect_name,
+                    "faceName": face_name,
                     "status": "ERROR",
                     "profileId": None,
                     "error": err,
@@ -363,7 +368,7 @@ async def register_suspects_batch_stream(
             # ── Pipeline (own session per file) ──────────────────
             file.file.seek(0)
             try:
-                result = await _register_one(file, suspect_name, alias, demographics_dict)
+                result = await _register_one(file, face_name, alias, demographics_dict, tenant_id=tenant_id)
             except Exception as exc:  # pragma: no cover
                 logger.exception("Unexpected error registering %s", filename)
                 processed += 1
@@ -373,7 +378,7 @@ async def register_suspects_batch_stream(
                     "processed": processed,
                     "total": total,
                     "filename": filename,
-                    "suspectName": suspect_name,
+                    "faceName": face_name,
                     "status": "ERROR",
                     "profileId": None,
                     "error": str(exc),
@@ -394,7 +399,7 @@ async def register_suspects_batch_stream(
                     "processed": processed,
                     "total": total,
                     "filename": filename,
-                    "suspectName": suspect_name,
+                    "faceName": face_name,
                     "status": result["status"],
                     "profileId": None,
                     "error": result.get("error"),
@@ -408,7 +413,7 @@ async def register_suspects_batch_stream(
                     "processed": processed,
                     "total": total,
                     "filename": filename,
-                    "suspectName": suspect_name,
+                    "faceName": face_name,
                     "status": "REGISTERED",
                     "profileId": result.get("profile_id"),
                     "error": None,
@@ -440,139 +445,148 @@ async def register_suspects_batch_stream(
     )
 
 
-# ── Suspect CRUD ─────────────────────────────────────────────────
+# ── Face CRUD ──────────────────────────────────────────────────────
 
 
-@router.get("/suspects", response_model=list[SuspectProfileOut])
-async def list_suspects(
+@router.get("/faces", response_model=list[SuspectProfileOut])
+async def list_faces(
+    tenant_id: int = Query(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
     """
-    List all registered suspect profiles.
+    List all registered face profiles for the given tenant.
     Embeddings are NEVER returned — metadata only.
     """
     result = await session.execute(
         select(
-            SuspectProfileModel.id,
-            SuspectProfileModel.suspect_name,
-            SuspectProfileModel.alias,
-            SuspectProfileModel.demographics,
-            SuspectProfileModel.created_at,
-        ).order_by(SuspectProfileModel.id.desc())
+            FaceProfileModel.id,
+            FaceProfileModel.face_name,
+            FaceProfileModel.alias,
+            FaceProfileModel.demographics,
+            FaceProfileModel.created_at,
+            FaceProfileModel.tenant_id,
+        ).where(FaceProfileModel.tenant_id == tenant_id).order_by(FaceProfileModel.id.desc())
     )
     rows = result.all()
     return [
         SuspectProfileOut(
             id=r.id,
-            suspect_name=r.suspect_name,
+            face_name=r.face_name,
             alias=r.alias,
             demographics=r.demographics,
             created_at=r.created_at.isoformat() if r.created_at else "",
+            tenant_id=r.tenant_id,
         )
         for r in rows
     ]
 
 
-@router.get("/suspects/{suspect_id}", response_model=SuspectProfileOut)
-async def get_suspect(
-    suspect_id: int,
+@router.get("/faces/{face_id}", response_model=SuspectProfileOut)
+async def get_face(
+    face_id: int,
+    tenant_id: int = Query(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
-    """Get a single suspect profile by ID (metadata only)."""
+    """Get a single face profile by ID (metadata only)."""
     result = await session.execute(
         select(
-            SuspectProfileModel.id,
-            SuspectProfileModel.suspect_name,
-            SuspectProfileModel.alias,
-            SuspectProfileModel.demographics,
-            SuspectProfileModel.created_at,
-        ).where(SuspectProfileModel.id == suspect_id)
+            FaceProfileModel.id,
+            FaceProfileModel.face_name,
+            FaceProfileModel.alias,
+            FaceProfileModel.demographics,
+            FaceProfileModel.created_at,
+            FaceProfileModel.tenant_id,
+        ).where(FaceProfileModel.id == face_id, FaceProfileModel.tenant_id == tenant_id)
     )
     row = result.one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="Suspect not found")
+        raise HTTPException(status_code=404, detail="Face not found")
     return SuspectProfileOut(
         id=row.id,
-        suspect_name=row.suspect_name,
+        face_name=row.face_name,
         alias=row.alias,
         demographics=row.demographics,
         created_at=row.created_at.isoformat() if row.created_at else "",
+        tenant_id=row.tenant_id,
     )
 
 
-@router.patch("/suspects/{suspect_id}", response_model=SuspectProfileOut)
-async def update_suspect(
-    suspect_id: int,
+@router.patch("/faces/{face_id}", response_model=SuspectProfileOut)
+async def update_face(
+    face_id: int,
     body: SuspectUpdateIn,
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
     """
-    Update a suspect's metadata (name / alias / demographics).
+    Update a face's metadata (name / alias / demographics).
     The face embedding is never modified via this endpoint.
     """
     result = await session.execute(
-        select(SuspectProfileModel).where(SuspectProfileModel.id == suspect_id)
+        select(FaceProfileModel).where(FaceProfileModel.id == face_id, FaceProfileModel.tenant_id == tenant_id)
     )
-    suspect = result.scalar_one_or_none()
-    if not suspect:
-        raise HTTPException(status_code=404, detail="Suspect not found")
+    face = result.scalar_one_or_none()
+    if not face:
+        raise HTTPException(status_code=404, detail="Face not found")
 
-    if body.suspect_name is not None:
-        suspect.suspect_name = body.suspect_name.strip()
+    if body.face_name is not None:
+        face.face_name = body.face_name.strip()
     if body.alias is not None:
-        suspect.alias = body.alias.strip() or None
+        face.alias = body.alias.strip() or None
     if body.demographics is not None:
-        suspect.demographics = body.demographics
+        face.demographics = body.demographics
 
     await session.commit()
-    await session.refresh(suspect)
+    await session.refresh(face)
 
     return SuspectProfileOut(
-        id=suspect.id,
-        suspect_name=suspect.suspect_name,
-        alias=suspect.alias,
-        demographics=suspect.demographics,
-        created_at=suspect.created_at.isoformat() if suspect.created_at else "",
+        id=face.id,
+        face_name=face.face_name,
+        alias=face.alias,
+        demographics=face.demographics,
+        created_at=face.created_at.isoformat() if face.created_at else "",
+        tenant_id=face.tenant_id,
     )
 
 
-@router.delete("/suspects/{suspect_id}", status_code=204)
-async def delete_suspect(
-    suspect_id: int,
+@router.delete("/faces/{face_id}", status_code=204)
+async def delete_face(
+    face_id: int,
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
     """
-    Hard-delete a suspect profile.
+    Hard-delete a face profile.
     Logs a REGISTER_DELETE audit entry BEFORE deleting (audit log is append-only).
-    Alerts referencing this suspect are left untouched (operator must dismiss manually).
+    Alerts referencing this face are left untouched (operator must dismiss manually).
     """
     result = await session.execute(
         select(
-            SuspectProfileModel.id,
-            SuspectProfileModel.suspect_name,
-        ).where(SuspectProfileModel.id == suspect_id)
+            FaceProfileModel.id,
+            FaceProfileModel.face_name,
+        ).where(FaceProfileModel.id == face_id, FaceProfileModel.tenant_id == tenant_id)
     )
     row = result.one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="Suspect not found")
+        raise HTTPException(status_code=404, detail="Face not found")
 
     # Write audit entry BEFORE delete (audit log is append-only)
     await add_audit_entry(
         session,
         event_type="REGISTER_DELETE",
-        query_hash=compute_query_hash(str(suspect_id).encode()),
-        result_name=None,   # no PII in logs — only suspect_id via query_hash
+        query_hash=compute_query_hash(str(face_id).encode()),
+        result_name=None,   # no PII in logs — only face_id via query_hash
         distance=None,
         gps_lat=None,
         gps_lon=None,
     )
 
     await session.execute(
-        sa_delete(SuspectProfileModel).where(SuspectProfileModel.id == suspect_id)
+        sa_delete(FaceProfileModel).where(FaceProfileModel.id == face_id, FaceProfileModel.tenant_id == tenant_id)
     )
     await session.commit()
     # 204 No Content
@@ -581,15 +595,16 @@ async def delete_suspect(
 # ── Face Re-enrolment ───────────────────────────────────────────
 
 
-@router.put("/suspects/{suspect_id}/face", response_model=ReenrollResponse)
-async def reenroll_suspect_face(
-    suspect_id: int,
+@router.put("/faces/{face_id}/face", response_model=ReenrollResponse)
+async def reenroll_face(
+    face_id: int,
     file: UploadFile = File(..., description="New face image (JPEG/PNG, ≤ 5 MB)"),
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
     """
-    Re-enrol a suspect's face — replace the stored 512-d ArcFace embedding
+    Re-enrol a face — replace the stored 512-d ArcFace embedding
     with one freshly extracted from the uploaded image.
 
     Only the ``face_embedding`` and ``face_embedding_enc`` columns are
@@ -610,22 +625,22 @@ async def reenroll_suspect_face(
     if err:
         raise HTTPException(status_code=400, detail=err)
 
-    # ── Confirm suspect exists ────────────────────────────────────
+    # ── Confirm face exists ───────────────────────────────────────
     row = await session.execute(
         select(
-            SuspectProfileModel.id,
-            SuspectProfileModel.suspect_name,
-        ).where(SuspectProfileModel.id == suspect_id)
+            FaceProfileModel.id,
+            FaceProfileModel.face_name,
+        ).where(FaceProfileModel.id == face_id, FaceProfileModel.tenant_id == tenant_id)
     )
-    suspect_row = row.one_or_none()
-    if not suspect_row:
-        raise HTTPException(status_code=404, detail="Suspect not found")
+    face_row = row.one_or_none()
+    if not face_row:
+        raise HTTPException(status_code=404, detail="Face not found")
 
-    suspect_name: str = suspect_row.suspect_name
+    face_name: str = face_row.face_name
 
     # ── Re-enrol (stages 1-4 + DB update) ────────────────────────
     file.file.seek(0)
-    result = await reenroll_pipeline(file, session, suspect_id, suspect_name)
+    result = await reenroll_pipeline(file, session, face_id, face_name, tenant_id=tenant_id)
 
     if result["status"] == "ERROR":
         raise HTTPException(status_code=422, detail=result.get("error", "Re-enrolment failed"))
@@ -642,18 +657,18 @@ async def reenroll_suspect_face(
     )
 
 
-# ── Suspect Test Image Retrieval ─────────────────────────────────
+# ── Face Test Image Retrieval ─────────────────────────────────────
 
 from fastapi.responses import FileResponse
 import os
 
-@router.get("/suspects/image/{name}")
-async def get_suspect_test_image(
+@router.get("/faces/image/{name}")
+async def get_face_test_image(
     name: str,
     _user: dict = Depends(get_current_user),
 ):
     """
-    Retrieve suspect mugshot from testdata directory for demonstration.
+    Retrieve face image from testdata directory for demonstration.
     Does not violate database raw image storage rules.
     """
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -681,5 +696,5 @@ async def get_suspect_test_image(
             file_path = os.path.join(testdata_dir, filename)
             return FileResponse(file_path)
             
-    raise HTTPException(status_code=404, detail="Suspect image not found in testdata")
+    raise HTTPException(status_code=404, detail="Face image not found in testdata")
 

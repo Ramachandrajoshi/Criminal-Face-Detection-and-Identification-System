@@ -174,10 +174,7 @@ docker run -d --name criminal_db \
   -p 5432:5432 \
   pgvector/pgvector:pg15
 
-# Run the database initialisation
-psql -U appuser -d criminaldb -f ../db/init.sql
-
-# Start the FastAPI dev server
+# Start the FastAPI dev server (migrations run automatically on startup)
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -201,7 +198,7 @@ The frontend will be available at http://localhost:5173.
 
 ## Database Setup
 
-The database schema is defined in [`db/init.sql`](db/init.sql). It creates three tables:
+The database schema is managed via auto-applied migrations in [`backend/app/db/migrations/`](backend/app/db/migrations/). All tables are created automatically on first backend startup — no manual SQL execution required.
 
 ### Tables
 
@@ -209,13 +206,13 @@ The database schema is defined in [`db/init.sql`](db/init.sql). It creates three
 
 ```sql
 CREATE TABLE suspect_profiles (
-    id               SERIAL PRIMARY KEY,
-    suspect_name     VARCHAR(100) NOT NULL,
-    alias            VARCHAR(100),
-    demographics     JSONB,
-    face_embedding   vector(512) NOT NULL,
-  face_embedding_enc BYTEA,
-    created_at       TIMESTAMPTZ DEFAULT now()
+    id                 SERIAL PRIMARY KEY,
+    person_name       VARCHAR(100) NOT NULL,
+    alias              VARCHAR(100),
+    demographics       JSONB,
+    face_embedding     vector(512) NOT NULL,
+    face_embedding_enc BYTEA,
+    created_at         TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX suspect_embedding_hnsw_idx
@@ -341,7 +338,7 @@ Upload a clear frontal face image along with the suspect's name and optional met
 curl -X POST http://localhost:8000/api/v1/register \
   -H "Authorization: Bearer <your_token>" \
   -F "file=@suspect_photo.jpg" \
-  -F "suspect_name=John Doe" \
+  -F "person_name=John Doe" \
   -F "alias=JD" \
   -F 'demographics={"age_band":"36-60","gender":"M","ethnicity":"Caucasian"}'
 ```
@@ -382,7 +379,7 @@ curl -X POST http://localhost:8000/api/v1/search \
   "matches": [
     {
       "id": 1,
-      "suspect_name": "John Doe",
+      "person_name": "John Doe",
       "alias": "JD",
       "distance": 0.42
     }
@@ -493,11 +490,11 @@ See [`backend/app/schemas/face.py`](backend/app/schemas/face.py) for full Pydant
 
 | Schema | Description |
 | --- | --- |
-| `RegisterRequest` | `suspect_name`, `alias`, `demographics` |
+| `RegisterRequest` | `person_name`, `alias`, `demographics` |
 | `RegisterResponse` | `status`, `profile_id`, `query_hash`, `embedding_dim`, `error` |
 | `SearchRequest` | `gps_lat`, `gps_lon` |
 | `SearchResponse` | `status`, `query_hash`, `matches[]`, `gps_lat`, `gps_lon` |
-| `MatchResult` | `id`, `suspect_name`, `alias`, `distance` |
+| `MatchResult` | `id`, `person_name`, `alias`, `distance` |
 | `AlertResponse` | `id`, `audit_log_id`, `suspect_id`, `event_type`, `distance`, `status`, `gps_lat`, `gps_lon`, `created_at`, `confirmed_at` |
 | `AuditEntryResponse` | `id`, `event_type`, `query_hash`, `result_name`, `distance`, `gps_lat`, `gps_lon`, `timestamp` |
 | `ConfirmRequest` | `confirmed` (boolean) |
@@ -620,7 +617,9 @@ project-root/
 │   └── Dockerfile
 │
 ├── db/
-│   ├── init.sql                      # Database schema + indexes
+│   ├── migrations/                   # Auto-applied on backend startup
+│   │   ├── 20260628000000_initial_schema_migration.py
+│   │   └── 20260628120000_unlink_alerts_suspect_migration.py
 │   └── seed_synthetic.py             # 100k synthetic profiles
 │
 ├── notebooks/
@@ -635,6 +634,19 @@ project-root/
 ```
 
 ---
+
+## Migration Management
+
+Migrations are auto-applied when the backend starts. To add a new migration:
+
+```bash
+# Create a new migration file in backend/app/db/migrations/
+# Naming: <YYYYMMDDHHMMSS>_<slug>_migration.py
+#
+# Implement async def upgrade(session) and optionally async def downgrade(session)
+```
+
+The runner tracks applied migrations in a `_migrations` table and skips already-applied ones.
 
 ## Testing
 

@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Form, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,19 +64,20 @@ async def list_alerts(
     status_filter: Optional[str] = Query(
         None, description="Filter by status: PENDING_REVIEW, CONFIRMED, DISMISSED"
     ),
+    tenant_id: int = Query(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
     """
     Retrieve recent alerts with pagination.
-    Supports filtering by alert status.
+    Supports filtering by alert status and tenant.
     """
     offset = (page - 1) * page_size
-    params: dict = {"limit": page_size, "offset": offset}
+    params: dict = {"limit": page_size, "offset": offset, "tenant_id": tenant_id}
 
     where_clause = ""
     if status_filter:
-        where_clause = "WHERE a.status = :status_filter"
+        where_clause = "AND a.status = :status_filter"
         params["status_filter"] = status_filter
 
     sql = text(
@@ -84,7 +85,7 @@ async def list_alerts(
         SELECT
             a.id,
             a.audit_log_id,
-            a.suspect_id,
+            a.face_id,
             a.event_type,
             a.distance,
             a.status,
@@ -92,10 +93,12 @@ async def list_alerts(
             a.gps_lon,
             a.created_at,
             a.confirmed_at,
-            s.suspect_name,
-            s.alias AS suspect_alias
+            f.face_name,
+            f.alias AS face_alias,
+            a.tenant_id
         FROM alerts a
-        LEFT JOIN suspect_profiles s ON a.suspect_id = s.id
+        LEFT JOIN face_profiles f ON a.face_id = f.id
+        WHERE a.tenant_id = :tenant_id
         {where_clause}
         ORDER BY a.created_at DESC
         LIMIT :limit OFFSET :offset
@@ -109,7 +112,7 @@ async def list_alerts(
         AlertResponse(
             id=row[0],
             audit_log_id=row[1],
-            suspect_id=row[2],
+            face_id=row[2],
             event_type=row[3],
             distance=row[4],
             status=row[5],
@@ -117,8 +120,9 @@ async def list_alerts(
             gps_lon=row[7],
             created_at=row[8].isoformat() if row[8] else None,
             confirmed_at=row[9].isoformat() if row[9] else None,
-            suspect_name=row[10],
-            suspect_alias=row[11],
+            face_name=row[10],
+            face_alias=row[11],
+            tenant_id=row[12],
         )
         for row in rows
     ]
@@ -128,6 +132,7 @@ async def list_alerts(
 async def confirm_alert(
     alert_id: int,
     confirm_data: ConfirmRequest,
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
@@ -144,7 +149,7 @@ async def confirm_alert(
         """
         UPDATE alerts
         SET status = :status, confirmed_at = :confirmed_at
-        WHERE id = :alert_id
+        WHERE id = :alert_id AND tenant_id = :tenant_id
         RETURNING id, status
         """
     )
@@ -152,7 +157,7 @@ async def confirm_alert(
     result = await _execute_with_retry(
         session,
         sql_update,
-        {"alert_id": alert_id, "status": status_val, "confirmed_at": confirmed_at},
+        {"alert_id": alert_id, "status": status_val, "confirmed_at": confirmed_at, "tenant_id": tenant_id},
     )
     await session.commit()
 
