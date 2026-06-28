@@ -4,8 +4,8 @@ export type EventType = 'MATCH' | 'NO_MATCH' | 'REGISTER' | 'SPOOF_BLOCKED';
 export type AlertStatus = 'PENDING_REVIEW' | 'CONFIRMED' | 'DISMISSED';
 export type UserRole = 'admin' | 'analyst';
 
-export interface SuspectMatch {
-  suspectName: string;
+export interface FaceMatch {
+  faceName: string;
   alias: string | null;
   distance: number;
   status: AlertStatus;
@@ -14,7 +14,7 @@ export interface SuspectMatch {
 export interface Alert {
   id: number;
   eventType: EventType;
-  match: SuspectMatch | null;
+  match: FaceMatch | null;
   gpsLat: number | null;
   gpsLon: number | null;
   timestamp: string;
@@ -34,7 +34,7 @@ export interface SearchResponse {
   queryHash: string;
   matches: Array<{
     id: number;
-    suspectName: string;
+    faceName: string;
     alias: string | null;
     distance: number;
   }>;
@@ -55,9 +55,9 @@ export interface RegisterResponse {
 export interface AlertItem {
   id: number;
   auditLogId: number | null;
-  suspectId: number | null;
-  suspectName?: string | null;
-  suspectAlias?: string | null;
+  faceId: number | null;
+  faceName?: string | null;
+  faceAlias?: string | null;
   eventType: string;
   distance: number | null;
   status: AlertStatus;
@@ -95,10 +95,10 @@ export interface AuthContextType {
   isLoading: boolean;
 }
 
-// ── Suspect CRUD ─────────────────────────────────────────────────
-export interface SuspectProfile {
+// ── Face CRUD ─────────────────────────────────────────────────────
+export interface FaceProfile {
   id: number;
-  suspectName: string;
+  faceName: string;
   alias: string | null;
   demographics: Record<string, unknown> | null;
   createdAt: string; // ISO-8601
@@ -107,7 +107,7 @@ export interface SuspectProfile {
 // ── Batch Search ─────────────────────────────────────────────────
 export interface BatchSearchMatch {
   id: number;
-  suspectName: string;
+  faceName: string;
   alias: string | null;
   distance: number;
 }

@@ -187,9 +187,9 @@ function SingleSearchPanel(): JSX.Element {
               <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 {result.matches.map((m) => (
                   <div key={m.id} style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '8px', padding: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <SuspectImage name={m.suspectName} style={{ width: '40px', height: '40px' }} />
+                    <SuspectImage name={m.faceName} style={{ width: '40px', height: '40px' }} />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 700, color: '#ef4444' }}>{m.suspectName}</div>
+                      <div style={{ fontWeight: 700, color: '#ef4444' }}>{m.faceName}</div>
                       {m.alias && <div style={{ fontSize: '0.75rem', color: '#64748b' }}>{m.alias}</div>}
                       <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.25rem', fontFamily: 'monospace' }}>
                         Distance: {m.distance.toFixed(4)} / Threshold: {(result.matchThreshold ?? 0.58).toFixed(2)}
@@ -241,7 +241,7 @@ function exportCsv(entries: BatchSearchResultEntry[]): void {
       String(i + 1),
       e.filename,
       e.status,
-      e.matches[0]?.suspectName ?? '',
+      e.matches[0]?.faceName ?? '',
       e.matches[0]?.distance.toFixed(4) ?? '',
       e.alertId !== null ? String(e.alertId) : '',
       e.fileMs !== undefined ? String(e.fileMs) : '',
@@ -544,10 +544,10 @@ function BatchSearchPanel(): JSX.Element {
                       <td style={{ padding: '0.625rem 1rem', color: entry.status === 'MATCH' ? '#ef4444' : '#64748b', fontWeight: entry.status === 'MATCH' ? 700 : 400 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                           {entry.status === 'MATCH' && entry.matches[0] && (
-                            <SuspectImage name={entry.matches[0].suspectName} style={{ width: '28px', height: '28px' }} />
+                            <SuspectImage name={entry.matches[0].faceName} style={{ width: '28px', height: '28px' }} />
                           )}
                           <div>
-                            <div>{entry.matches[0]?.suspectName ?? '—'}</div>
+                            <div>{entry.matches[0]?.faceName ?? '—'}</div>
                             {entry.matches.length > 1 && (
                               <span style={{ color: '#38bdf8', fontSize: '0.7rem' }}>
                                 +{entry.matches.length - 1} {expandedRows.has(idx) ? '▲' : '▼'}
@@ -569,8 +569,8 @@ function BatchSearchPanel(): JSX.Element {
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
                             {entry.matches.slice(1).map((m) => (
                               <div key={m.id} style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                                <SuspectImage name={m.suspectName} style={{ width: '24px', height: '24px' }} />
-                                <span style={{ color: '#ef4444', fontWeight: 600 }}>{m.suspectName}</span>
+                                <SuspectImage name={m.faceName} style={{ width: '24px', height: '24px' }} />
+                                <span style={{ color: '#ef4444', fontWeight: 600 }}>{m.faceName}</span>
                                 {m.alias && <span style={{ color: '#64748b' }}>{m.alias}</span>}
                                 <span style={{ fontFamily: 'monospace' }}>{m.distance.toFixed(4)}</span>
                               </div>

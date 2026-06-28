@@ -97,7 +97,7 @@ def seed(count: int = DEFAULT_COUNT):
 
         cur.executemany(
             """
-            INSERT INTO suspect_profiles (suspect_name, alias, demographics, face_embedding)
+            INSERT INTO suspect_profiles (person_name, alias, demographics, face_embedding)
             VALUES (%s, %s, %s::jsonb, %s::vector)
             """,
             rows,
@@ -110,7 +110,7 @@ def seed(count: int = DEFAULT_COUNT):
     total = cur.fetchone()[0]
     print(f"\nDone. Total rows in suspect_profiles: {total}")
 
-    # Rebuild HNSW index (it was created during init.sql; rebuild covers any gaps)
+    # Rebuild HNSW index (created by migration; rebuild covers any gaps)
     print("Rebuilding HNSW index …")
     cur.execute("REINDEX INDEX suspect_embedding_hnsw_idx;")
     conn.commit()

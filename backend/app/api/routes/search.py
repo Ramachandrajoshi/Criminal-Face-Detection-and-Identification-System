@@ -45,11 +45,12 @@ async def search_face(
         ),
     ),
     limit: int = Query(10, ge=1, le=50, description="Max matches to return"),
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
     """
-    Search for a matching suspect profile against the database.
+    Search for a matching face profile against the database.
 
     - **Photo uploads**: set ``is_live_capture=false`` (default) — liveness check skipped.
     - **Live camera frames**: set ``is_live_capture=true`` — liveness / anti-spoofing enforced.
@@ -83,6 +84,7 @@ async def search_face(
         gps_lon=gps_lon,
         limit=limit,
         enforce_liveness=is_live_capture,   # only live camera frames trigger liveness
+        tenant_id=tenant_id,
     )
 
     # ── Audit trail ──────────────────────────────────────────────
@@ -91,7 +93,7 @@ async def search_face(
 
     result_name: Optional[str] = None
     if event_type == "MATCH" and result.get("matches"):
-        result_name = result["matches"][0]["suspect_name"]
+        result_name = result["matches"][0]["face_name"]
 
     audit_id: Optional[int] = None
     alert_id: Optional[int] = None
@@ -106,6 +108,7 @@ async def search_face(
             distance=result["matches"][0]["distance"] if result.get("matches") else None,
             gps_lat=gps_lat,
             gps_lon=gps_lon,
+            tenant_id=tenant_id,
         )
 
     if event_type == "MATCH" and audit_id is not None:
@@ -113,18 +116,19 @@ async def search_face(
         alert_id = await create_alert(
             session,
             audit_log_id=audit_id,
-            suspect_id=best.get("id") if best else None,
+            face_id=best.get("id") if best else None,
             event_type="MATCH",
             distance=best.get("distance") if best else None,
             gps_lat=gps_lat,
             gps_lon=gps_lon,
+            tenant_id=tenant_id,
         )
 
     # ── Response ─────────────────────────────────────────────────
     matches = [
         MatchResult(
             id=m["id"],
-            suspect_name=m["suspect_name"],
+            face_name=m["face_name"],
             alias=m["alias"],
             distance=m["distance"],
         )
@@ -147,6 +151,7 @@ async def _search_one(
     gps_lat: Optional[float],
     gps_lon: Optional[float],
     limit: int,
+    tenant_id: int = 1,
 ) -> dict:
     """
     Run the full search pipeline for a single file using its own short-lived session.
@@ -161,6 +166,7 @@ async def _search_one(
                 gps_lon=gps_lon,
                 limit=limit,
                 enforce_liveness=False,  # batch photo upload — never live capture
+                tenant_id=tenant_id,
             )
 
             query_hash = result.get("query_hash", compute_query_hash(b""))
@@ -168,7 +174,7 @@ async def _search_one(
 
             result_name: Optional[str] = None
             if event_type == "MATCH" and result.get("matches"):
-                result_name = result["matches"][0]["suspect_name"]
+                result_name = result["matches"][0]["face_name"]
 
             audit_id: Optional[int] = None
             alert_id: Optional[int] = None
@@ -182,6 +188,7 @@ async def _search_one(
                     distance=result["matches"][0]["distance"] if result.get("matches") else None,
                     gps_lat=gps_lat,
                     gps_lon=gps_lon,
+                    tenant_id=tenant_id,
                 )
 
             if event_type == "MATCH" and audit_id is not None:
@@ -189,11 +196,12 @@ async def _search_one(
                 alert_id = await create_alert(
                     session,
                     audit_log_id=audit_id,
-                    suspect_id=best.get("id") if best else None,
+                    face_id=best.get("id") if best else None,
                     event_type="MATCH",
                     distance=best.get("distance") if best else None,
                     gps_lat=gps_lat,
                     gps_lon=gps_lon,
+                    tenant_id=tenant_id,
                 )
 
             return {
@@ -225,6 +233,7 @@ async def search_faces_batch_stream(
     gps_lat: Optional[float] = Form(None, ge=-90, le=90),
     gps_lon: Optional[float] = Form(None, ge=-180, le=180),
     limit: int = Query(10, ge=1, le=50),
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
     _user: dict = Depends(get_current_user),
 ):
     """
@@ -318,7 +327,7 @@ async def search_faces_batch_stream(
                 continue
 
             file.file.seek(0)
-            result = await _search_one(file, gps_lat, gps_lon, limit)
+            result = await _search_one(file, gps_lat, gps_lon, limit, tenant_id=tenant_id)
 
             file_ms = int((time.perf_counter() - file_start) * 1000)
             elapsed_ms = int((time.perf_counter() - batch_start) * 1000)
@@ -336,7 +345,7 @@ async def search_faces_batch_stream(
             matches_out = [
                 {
                     "id": m["id"],
-                    "suspectName": m["suspect_name"],
+                    "suspectName": m["person_name"],
                     "alias": m.get("alias"),
                     "distance": m["distance"],
                 }

@@ -6,7 +6,7 @@ import type {
   AuditEntry,
   LoginCredentials,
   TokenResponse,
-  SuspectProfile,
+  FaceProfile,
   BatchSearchSseEvent,
 } from '../types';
 
@@ -202,7 +202,7 @@ export interface BatchFileResult {
   filename: string;
   status: 'REGISTERED' | 'ERROR' | 'SPOOF_BLOCKED';
   profileId: number | null;
-  suspectName: string;
+  faceName: string;
   error: string | null;
 }
 
@@ -229,7 +229,7 @@ export interface SseProgressEvent {
   processed: number;
   total: number;
   filename?: string;
-  suspectName?: string;
+  faceName?: string;
   status?: 'REGISTERED' | 'ERROR' | 'SPOOF_BLOCKED';
   profileId?: number | null;
   error?: string | null;
@@ -351,22 +351,22 @@ export const getAuditLog = (
 export const healthCheck = (): Promise<{ status: string }> =>
   api.get('/api/v1/health').then((r) => r.data);
 
-// ── Suspects CRUD ────────────────────────────────────────────────
+// ── Faces CRUD ───────────────────────────────────────────────────
 
-export const getSuspects = (): Promise<SuspectProfile[]> =>
-  api.get<SuspectProfile[]>('/api/v1/suspects').then((r) => r.data);
+export const getFaces = (): Promise<FaceProfile[]> =>
+  api.get<FaceProfile[]>('/api/v1/faces').then((r) => r.data);
 
-export const getSuspect = (id: number): Promise<SuspectProfile> =>
-  api.get<SuspectProfile>(`/api/v1/suspects/${id}`).then((r) => r.data);
+export const getFace = (id: number): Promise<FaceProfile> =>
+  api.get<FaceProfile>(`/api/v1/faces/${id}`).then((r) => r.data);
 
-export const updateSuspect = (
+export const updateFace = (
   id: number,
-  patch: { suspectName?: string; alias?: string | null; demographics?: Record<string, unknown> | null },
-): Promise<SuspectProfile> =>
-  api.patch<SuspectProfile>(`/api/v1/suspects/${id}`, patch).then((r) => r.data);
+  patch: { faceName?: string; alias?: string | null; demographics?: Record<string, unknown> | null },
+): Promise<FaceProfile> =>
+  api.patch<FaceProfile>(`/api/v1/faces/${id}`, patch).then((r) => r.data);
 
-export const deleteSuspect = (id: number): Promise<void> =>
-  api.delete(`/api/v1/suspects/${id}`).then(() => undefined);
+export const deleteFace = (id: number): Promise<void> =>
+  api.delete(`/api/v1/faces/${id}`).then(() => undefined);
 
 // ── Batch Search SSE ─────────────────────────────────────────────
 

@@ -2,14 +2,14 @@
 SQLAlchemy ORM models.
 
 All timestamp columns use ``DateTime(timezone=True)`` which maps to PostgreSQL
-``TIMESTAMPTZ``.  This matches the DB schema (init.sql) and lets asyncpg accept
+``TIMESTAMPTZ``.  This matches the migration schema and lets asyncpg accept
 timezone-aware Python ``datetime`` objects without raising:
   "can't subtract offset-naive and offset-aware datetimes"
 """
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import Column, Float, ForeignKey, Integer, LargeBinary, String, Text, text
 from sqlalchemy import DateTime                      # re-imported cleanly below
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -28,20 +28,19 @@ def _utcnow() -> datetime:
 
 # ── Models ───────────────────────────────────────────────────────
 
-class SuspectProfile(Base):
-    __tablename__ = "suspect_profiles"
+class FaceProfile(Base):
+    __tablename__ = "face_profiles"
 
     id = Column(Integer, primary_key=True, index=True)
-    suspect_name = Column(String(100), nullable=False)
+    face_name = Column(String(100), nullable=False)
     alias = Column(String(100), nullable=True)
     demographics = Column(JSONB, nullable=True)
     # Stored as pgvector vector(512) in DB; encrypted payload stored separately.
     face_embedding = Column(Text, nullable=False)
     face_embedding_enc = Column(LargeBinary, nullable=True)
+    tenant_id = Column(Integer, nullable=False, server_default=text("1"))
     # TIMESTAMPTZ — must use timezone=True so asyncpg accepts tz-aware datetimes
     created_at = Column(DateTime(timezone=True), default=_utcnow)
-
-    alerts = relationship("Alert", back_populates="suspect")
 
 
 class AuditLog(Base):
@@ -54,6 +53,7 @@ class AuditLog(Base):
     distance = Column(Float, nullable=True)
     gps_lat = Column(Float, nullable=True)
     gps_lon = Column(Float, nullable=True)
+    tenant_id = Column(Integer, nullable=False, server_default=text("1"))
     # TIMESTAMPTZ — must use timezone=True
     timestamp = Column(DateTime(timezone=True), default=_utcnow)
 
@@ -65,16 +65,16 @@ class Alert(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     audit_log_id = Column(Integer, ForeignKey("audit_log.id"), nullable=True)
-    suspect_id = Column(Integer, ForeignKey("suspect_profiles.id"), nullable=True)
+    face_id = Column(Integer, nullable=True)
     event_type = Column(String(50), nullable=False)
     distance = Column(Float, nullable=True)
     status = Column(String(20), nullable=False, default="PENDING_REVIEW")
     gps_lat = Column(Float, nullable=True)
     gps_lon = Column(Float, nullable=True)
+    tenant_id = Column(Integer, nullable=False, server_default=text("1"))
     # TIMESTAMPTZ — must use timezone=True
     created_at = Column(DateTime(timezone=True), default=_utcnow)
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
 
     audit_log = relationship("AuditLog", back_populates="alerts")
-    suspect = relationship("SuspectProfile", back_populates="alerts")
 

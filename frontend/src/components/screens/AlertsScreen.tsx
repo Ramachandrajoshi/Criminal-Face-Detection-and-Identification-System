@@ -92,10 +92,10 @@ export default function AlertsScreen(): JSX.Element {
                   <span style={{ fontSize: '0.6rem', color: '#64748b', fontWeight: 600 }}>QUERY</span>
                   <QueryImage alertId={alert.id} style={{ width: '56px', height: '56px' }} />
                 </div>
-                {alert.suspectName && (
+                {alert.faceName && (
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem' }}>
                     <span style={{ fontSize: '0.6rem', color: '#ef4444', fontWeight: 600 }}>MATCH</span>
-                    <SuspectImage name={alert.suspectName} style={{ width: '56px', height: '56px' }} />
+                    <SuspectImage name={alert.faceName} style={{ width: '56px', height: '56px' }} />
                   </div>
                 )}
               </div>
@@ -116,9 +116,9 @@ export default function AlertsScreen(): JSX.Element {
                   <span style={{ color: '#64748b', fontSize: '0.8125rem', fontFamily: 'monospace' }}>
                     #{alert.id}
                   </span>
-                  {alert.suspectName && (
+                  {alert.faceName && (
                     <span style={{ color: '#ef4444', fontWeight: 700, fontSize: '0.875rem' }}>
-                      👤 {alert.suspectName} {alert.suspectAlias ? `(${alert.suspectAlias})` : ''}
+                      👤 {alert.faceName} {alert.faceAlias ? `(${alert.faceAlias})` : ''}
                     </span>
                   )}
                   <span style={{

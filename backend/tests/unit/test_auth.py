@@ -117,7 +117,7 @@ class TestAuthMiddleware:
         response = client.post(
             "/api/v1/register",
             files={"file": ("test.jpg", buf, "image/jpeg")},
-            data={"suspect_name": "No Auth"},
+            data={"face_name": "No Auth"},
         )
         assert response.status_code == 401
 

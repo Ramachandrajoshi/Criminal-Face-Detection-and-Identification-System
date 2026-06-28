@@ -29,7 +29,7 @@ export default function SuspectImage({ name, style }: SuspectImageProps): JSX.El
       try {
         const token = getToken();
         const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '';
-        const response = await fetch(`${baseUrl}/api/v1/suspects/image/${encodeURIComponent(name)}`, {
+        const response = await fetch(`${baseUrl}/api/v1/face/image/${encodeURIComponent(name)}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
         if (active && response.ok) {

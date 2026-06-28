@@ -158,7 +158,7 @@ class TestAlertResponseStructure:
         alert = AlertResponse(
             id=1,
             audit_log_id=10,
-            suspect_id=42,
+            face_id=42,
             event_type="MATCH",
             distance=0.32,
             status="PENDING_REVIEW",

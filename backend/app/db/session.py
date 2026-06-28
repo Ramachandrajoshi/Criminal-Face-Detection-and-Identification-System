@@ -3,21 +3,40 @@ SQLAlchemy async session factory.
 
 Pool configuration:
   - pool_pre_ping=True      : test connection health before checkout (eliminates
-                               "connection is closed" from stale idle connections)
+                                "connection is closed" from stale idle connections)
   - pool_recycle=1800       : recycle connections every 30 min to avoid OS/firewall
-                               silently dropping long-lived TCP connections
+                                silently dropping long-lived TCP connections
   - pool_size=10            : baseline concurrent connections
   - max_overflow=20         : allow burst up to 30 total connections
   - pool_timeout=30         : wait up to 30 s for a connection before raising
 """
 
+import contextvars
 import logging
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# ── Thread-local-ish tenant context ─────────────────────────────
+# Each async request sets its tenant_id here; the DB event listener reads it
+# to configure PostgreSQL RLS per-session.  Falls back to 1 when unset.
+_tenant_id_var: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "tenant_id", default=1
+)
+
+
+def set_tenant_id(tenant_id: int) -> None:
+    """Set the tenant_id for the current async context (called by middleware)."""
+    _tenant_id_var.set(int(tenant_id))
+
+
+def get_tenant_id() -> int:
+    """Return the tenant_id for the current async context (default: 1)."""
+    return _tenant_id_var.get()
 
 DATABASE_URL = (
     f"postgresql+asyncpg://{settings.postgres_user}:{settings.postgres_password}"
@@ -62,14 +81,29 @@ async def get_session() -> AsyncSession:
       - rolled back automatically on any unhandled exception (prevents the
         session being returned to the pool in a dirty / broken state)
       - closed unconditionally in the finally block
+      - has the tenant_id RLS context set via SET LOCAL on the connection
     """
-    async with async_session_factory() as session:
-        try:
-            yield session
-        except Exception:
-            # Roll back any open transaction so the connection is clean
-            # when returned to the pool.
-            await session.rollback()
-            raise
-        # Note: async_session_factory().__aexit__ calls session.close(),
-        # which returns the underlying connection to the pool cleanly.
+    from sqlalchemy import event
+
+    tenant_id = get_tenant_id()
+    session = None
+    try:
+        async with async_session_factory() as session:
+            # Set tenant context on the underlying sync connection
+            # before any queries are executed.
+            await session.run_sync(
+                lambda s: s.execute(
+                    text(f"SET LOCAL jwt.claims.tenant = '{tenant_id}'")
+                )
+            )
+            try:
+                yield session
+            except Exception:
+                # Roll back any open transaction so the connection is clean
+                # when returned to the pool.
+                await session.rollback()
+                raise
+    finally:
+        if session is not None:
+            # Ensure session is closed even if yield was never reached
+            await session.close()

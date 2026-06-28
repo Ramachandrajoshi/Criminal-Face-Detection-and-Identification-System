@@ -13,14 +13,16 @@ from app.core.config import settings
 security = HTTPBearer()
 
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
-    """Create a JWT access token (HS256)."""
+def create_access_token(data: dict, expires_delta: timedelta | None = None, tenant_id: int | None = None) -> str:
+    """Create a JWT access token (HS256) with an optional tenant_id claim."""
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (
         expires_delta
         or timedelta(hours=settings.jwt_expiry_hours)
     )
     to_encode.update({"exp": expire})
+    if tenant_id is not None:
+        to_encode["tenant"] = tenant_id
     return jwt.encode(to_encode, settings.jwt_secret, algorithm="HS256")
 
 

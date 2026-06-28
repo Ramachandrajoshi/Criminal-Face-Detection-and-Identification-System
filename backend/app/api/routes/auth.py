@@ -94,7 +94,10 @@ async def login(request: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = create_access_token({"sub": request.username, "role": "admin"})
+    token = create_access_token(
+        {"sub": request.username, "role": "admin"},
+        tenant_id=settings.default_tenant_id,
+    )
     logger.info("Successful login for user: %s", request.username)
 
     return TokenResponse(

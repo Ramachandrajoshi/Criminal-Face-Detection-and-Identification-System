@@ -27,7 +27,7 @@ export default function AlertPanel() {
         <div key={alert.id} className="alert-item">
           <div className="alert-header">
             <span style={{ fontSize: '0.8125rem', fontWeight: 600 }}>
-              {alert.suspectId ? 'Suspect Match' : 'Detection'}
+              {alert.faceName ? 'Face Match' : 'Detection'}
             </span>
             <span className={`alert-badge ${alert.status.toLowerCase()}`}>
               {alert.status}

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAlerts } from '../../hooks/useAlerts';
-import { getSuspects } from '../../api/client';
-import type { AlertItem } from '../../types';
+import { getFaces } from '../../api/client';
+import type { AlertItem, FaceProfile } from '../../types';
 
 const statusColor = (s: string): string =>
   s === 'CONFIRMED' ? '#ef4444'
@@ -22,8 +22,8 @@ export default function OverviewScreen(): JSX.Element {
 
   useEffect(() => {
     setLoadingCount(true);
-    getSuspects()
-      .then((s) => setSuspectCount(s.length))
+    getFaces()
+      .then((s: FaceProfile[]) => setSuspectCount(s.length))
       .catch(() => setSuspectCount(null))
       .finally(() => setLoadingCount(false));
   }, []);
