@@ -248,7 +248,13 @@ async def verify_match(
     from app.db.vector_ops import cosine_ann_query
 
     query_hash = compute_query_hash(embedding.tobytes())
-    matches = await cosine_ann_query(session, embedding.tolist(), threshold=threshold, limit=limit)
+    matches = await cosine_ann_query(
+        session,
+        embedding.tolist(),
+        threshold=threshold,
+        limit=limit,
+        tenant_id=tenant_id if tenant_id is not None else 1,
+    )
 
     for m in matches:
         m["query_hash"] = query_hash
