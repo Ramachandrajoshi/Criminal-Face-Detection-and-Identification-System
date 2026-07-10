@@ -151,3 +151,4 @@ Thumbs.db
 *.temp
 testdata/
 fetch_wanted_criminals.py
+test_images/
