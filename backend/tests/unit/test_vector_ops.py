@@ -77,8 +77,8 @@ class TestCosineANNQuery:
         class MockResult:
             def __iter__(self):
                 return iter([
-                    Row([1, "John Doe", "JD", 0.32]),
-                    Row([2, "Jane Smith", None, 0.45]),
+                    Row([1, "John Doe", "JD", 0.32, 1]),
+                    Row([2, "Jane Smith", None, 0.45, 1]),
                 ])
 
         mock_session.execute = AsyncMock(return_value=MockResult())
@@ -108,9 +108,9 @@ class TestCosineANNQuery:
         class MockResult:
             def __iter__(self):
                 return iter([
-                    Row([1, "Close", None, 0.30]),
-                    Row([2, "Borderline", None, 0.58]),
-                    Row([3, "TooFar", None, 0.70]),
+                    Row([1, "Close", None, 0.30, 1]),
+                    Row([2, "Borderline", None, 0.58, 1]),
+                    Row([3, "TooFar", None, 0.70, 1]),
                 ])
 
         mock_session.execute = AsyncMock(return_value=MockResult())
@@ -182,7 +182,7 @@ class TestCosineANNQuery:
 
         class MockResult:
             def __iter__(self):
-                return iter([Row([1, "Test", None, 0.123456789])])
+                return iter([Row([1, "Test", None, 0.123456789, 1])])
 
         mock_session.execute = AsyncMock(return_value=MockResult())
 

@@ -55,7 +55,8 @@ async def cosine_ann_query(
             id,
             face_name,
             alias,
-            (face_embedding <=> :vec) AS distance
+            (face_embedding <=> :vec) AS distance,
+            embedding_version
         FROM face_profiles
         WHERE (face_embedding <=> :vec) <= :threshold
           AND tenant_id = :tenant_id
@@ -76,6 +77,7 @@ async def cosine_ann_query(
             "face_name": row[1],
             "alias": row[2],
             "distance": round(float(row[3]), 6),
+            "embedding_version": row[4],
             "tenant_id": tenant_id,
         })
 
@@ -100,8 +102,8 @@ async def register_profile(
 
     sql = text(
         """
-        INSERT INTO face_profiles (face_name, alias, demographics, face_embedding, face_embedding_enc, tenant_id)
-        VALUES (:face_name, :alias, :demographics, CAST(:vec AS vector), :enc, :tenant_id)
+        INSERT INTO face_profiles (face_name, alias, demographics, face_embedding, face_embedding_enc, tenant_id, embedding_version)
+        VALUES (:face_name, :alias, :demographics, CAST(:vec AS vector), :enc, :tenant_id, 2)
         RETURNING id
         """
     )
@@ -147,7 +149,8 @@ async def update_face_embedding(
         """
         UPDATE face_profiles
         SET face_embedding     = CAST(:vec AS vector),
-            face_embedding_enc = :enc
+            face_embedding_enc = :enc,
+            embedding_version  = 2
         WHERE id = :face_id AND tenant_id = :tenant_id
         RETURNING id
         """

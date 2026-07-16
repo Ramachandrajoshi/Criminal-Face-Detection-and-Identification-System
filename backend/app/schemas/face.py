@@ -37,6 +37,7 @@ class MatchResult(_BaseCamel):
     face_name: str
     alias: Optional[str] = None
     distance: float
+    embedding_version: int = 1
     tenant_id: int = 1
 
 
@@ -107,6 +108,7 @@ class SuspectProfileOut(_BaseCamel):
     face_name: str
     alias: Optional[str] = None
     demographics: Optional[dict] = None
+    embedding_version: int = 1
     created_at: str   # ISO-8601 string
     tenant_id: int = 1
 
