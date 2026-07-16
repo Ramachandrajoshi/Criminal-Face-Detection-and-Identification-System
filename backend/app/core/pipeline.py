@@ -149,29 +149,129 @@ def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
 
     Steps
     -----
-    1. uint8 conversion  — restore [0, 255] uint8 if input is float.
-    2. Lanczos resize    — 112 × 112 (ArcFace canonical size) at highest
-                          interpolation quality.
-    3. CLAHE             — Contrast Limited Adaptive Histogram Equalization
-                          applied to the L* channel in LAB color space.
-                          This normalises per-image illumination without
-                          altering hue or saturation, tightening same-person
-                          embedding variance across different lighting conditions.
+    All enhancement steps operate on the *large* crop (e.g. 300×400 px from
+    the detector) BEFORE the final 112×112 resize, so the quality gain carries
+    through to the embedding.
+
+    0. uint8 conversion     — restore [0, 255] if input is float32 from DeepFace.
+    1. Upscale tiny crops   — Lanczos super-sample if shortest side < threshold.
+                              CCTV sub-crops are often < 80 px; upsampling before
+                              any enhancement gives CLAHE and the sharpener more
+                              pixels to work with.
+    2. Denoising            — fastNlMeansDenoisingColored (h=5, hColor=5).
+                              Applied BEFORE CLAHE so the equaliser amplifies
+                              signal rather than sensor noise.
+    3. Auto-gamma           — gamma = log(0.5) / log(mean_luminance / 255).
+                              Lifts dark / under-exposed faces toward mid-tone.
+                              For already-bright images gamma ≈ 1.0 (no-op).
+    4. CLAHE                — Contrast Limited Adaptive Histogram Equalization
+                              on the LAB L* channel.  Normalises local illumination
+                              without altering hue or saturation, tightening
+                              same-person embedding variance across lighting.
+    5. Unsharp mask         — Recovers edge detail blurred by the denoiser.
+                              output = strength × sharp − (strength−1) × blurred
+    6. Pad → 112×112 Lanczos resize — ArcFace canonical size.
     """
     import cv2
+    import math
 
-    # Step 1: uint8 conversion
+    # ── Step 0: uint8 conversion ─────────────────────────────────────────────
     if face.dtype != np.uint8:
         face = (face * 255.0).clip(0, 255).astype(np.uint8)
 
-    # Step 2: resize to ArcFace canonical 112 × 112
-    # IMPORTANT: preserve aspect ratio.  The aligned crop returned by
-    # ``extract_faces(align=True)`` is non-square (e.g. 227×167).  A direct
-    # ``cv2.resize(face, (112, 112))`` STRETCHES the face, distorting facial
-    # geometry and collapsing inter-class cosine distance — measured at
-    # 0.45 → 0.29 between two distinct faces, which manufactures false matches.
-    # Pad to a square first, then resize.  This matches DeepFace's native
-    # ArcFace preprocessing and keeps identity-separating power intact.
+    # At this point face is RGB uint8.
+    # Convert to BGR once for OpenCV processing; we'll convert back at the end.
+    face_bgr = cv2.cvtColor(face, cv2.COLOR_RGB2BGR)
+
+    # ── Step 1: Upscale tiny crops ───────────────────────────────────────────
+    # CCTV face crops can be as small as 50×50 px. Upscaling to at least
+    # `small_crop_min_side` before enhancement gives the subsequent filters
+    # significantly more pixels to work with and reduces blocking artefacts.
+    if settings.enable_upscale_small_crops:
+        h, w = face_bgr.shape[:2]
+        min_side = min(h, w)
+        if min_side < settings.small_crop_min_side:
+            scale = settings.small_crop_min_side / min_side
+            new_w = max(int(w * scale), settings.small_crop_min_side)
+            new_h = max(int(h * scale), settings.small_crop_min_side)
+            face_bgr = cv2.resize(
+                face_bgr, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4
+            )
+            logger.debug(
+                "Upscaled small crop from %dx%d → %dx%d (scale=%.2f)",
+                w, h, new_w, new_h, scale,
+            )
+
+    # ── Step 2: Denoising ────────────────────────────────────────────────────
+    # Non-local means denoising removes CCTV sensor/compression noise before
+    # the contrast equaliser runs. h=5 is conservative — strong enough to
+    # smooth noise without blurring eye or lip edges.
+    if settings.enable_denoising:
+        face_bgr = cv2.fastNlMeansDenoisingColored(
+            face_bgr,
+            None,
+            h=5,
+            hColor=5,
+            templateWindowSize=7,
+            searchWindowSize=21,
+        )
+
+    # ── Step 3: Auto-gamma correction ────────────────────────────────────────
+    # Computes a per-image gamma that maps the observed mean luminance toward
+    # the perceptual mid-tone (0.5 in [0,1]) using the relation:
+    #
+    #   γ = log(0.5) / log(μ / 255)
+    #
+    # The LUT applies x^γ (not x^(1/γ)):
+    #   • Dark image  (μ ≈ 40):  γ ≈ 0.32  → x^0.32  lifts shadows  ✓
+    #   • Mid image   (μ ≈ 128): γ ≈ 1.0   → x^1.0   identity       ✓
+    #   • Bright image(μ ≈ 220): γ ≈ 4.5   → x^4.5   compresses highlights ✓
+    if settings.enable_gamma_correction:
+        gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+        mean_lum = float(np.mean(gray))
+        if mean_lum > 1.0:  # guard against pure-black frames
+            gamma = math.log(0.5) / math.log(mean_lum / 255.0)
+            gamma = float(np.clip(gamma, 0.1, 5.0))  # prevent extreme correction
+            # Apply x^gamma: for dark images (gamma<1) this lifts shadows.
+            lut = np.array(
+                [((i / 255.0) ** gamma) * 255 for i in range(256)],
+                dtype=np.uint8,
+            )
+            face_bgr = cv2.LUT(face_bgr, lut)
+            logger.debug(
+                "Auto-gamma: mean_lum=%.1f → gamma=%.3f", mean_lum, gamma
+            )
+
+
+    # ── Step 4: CLAHE (LAB L* channel) ───────────────────────────────────────
+    # Contrast-limited equalisation on the luminance channel only.
+    # Operates AFTER gamma so the histogram being equalised is already
+    # reasonably centred, letting CLAHE handle local contrast rather than
+    # global exposure.
+    if settings.enable_clahe:
+        face_lab = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2LAB)
+        clahe = cv2.createCLAHE(
+            clipLimit=settings.clahe_clip_limit,
+            tileGridSize=(8, 8),
+        )
+        face_lab[:, :, 0] = clahe.apply(face_lab[:, :, 0])
+        face_bgr = cv2.cvtColor(face_lab, cv2.COLOR_LAB2BGR)
+
+    # ── Step 5: Unsharp mask ─────────────────────────────────────────────────
+    # Recovers the edge detail that fastNlMeansDenoisingColored softens.
+    # Formula: output = strength × sharp − (strength − 1) × blurred
+    # With strength=1.5: output = 1.5 × face − 0.5 × blurred  (+50% edges)
+    # Uses cv2.addWeighted which clamps to uint8 automatically.
+    if settings.enable_unsharp_mask:
+        blurred = cv2.GaussianBlur(face_bgr, (0, 0), sigmaX=2.0)
+        s = float(settings.unsharp_strength)
+        face_bgr = cv2.addWeighted(face_bgr, s, blurred, -(s - 1.0), 0)
+
+    # ── Step 6: Pad → 112×112 Lanczos resize ─────────────────────────────────
+    # Convert back to RGB for ArcFace.  Pad to square first to avoid
+    # stretching the face geometry (a direct 112×112 resize on a non-square
+    # crop collapses inter-class distance — see original docstring).
+    face = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
     if face.shape[:2] != (112, 112):
         h, w = face.shape[:2]
         side = max(h, w)
@@ -181,19 +281,6 @@ def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
             face, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0
         )
         face = cv2.resize(face, (112, 112), interpolation=cv2.INTER_LANCZOS4)
-
-    # Step 3: CLAHE illumination normalisation (LAB color space, L channel only)
-    if settings.enable_clahe:
-        # The face array from DeepFace is RGB; OpenCV's cvtColor expects BGR.
-        face_bgr = cv2.cvtColor(face, cv2.COLOR_RGB2BGR)
-        face_lab = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2LAB)
-        clahe = cv2.createCLAHE(
-            clipLimit=settings.clahe_clip_limit,
-            tileGridSize=(8, 8),
-        )
-        face_lab[:, :, 0] = clahe.apply(face_lab[:, :, 0])
-        face_bgr = cv2.cvtColor(face_lab, cv2.COLOR_LAB2BGR)
-        face = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
 
     return face
 
