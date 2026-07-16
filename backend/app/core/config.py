@@ -33,6 +33,34 @@ class Settings(BaseSettings):
     # Minimum CLAHE clip limit (lower = less aggressive contrast enhancement).
     clahe_clip_limit: float = 2.0
 
+    # --- Enhanced preprocessing stages (all applied BEFORE the 112×112 resize) ---
+
+    # Upscale tiny face crops via Lanczos super-sampling before any processing.
+    # CCTV sub-crops are often < 80 px wide; upsampling to a minimum side length
+    # before enhancement gives CLAHE and the unsharp mask more pixels to work on.
+    enable_upscale_small_crops: bool = True
+    # Minimum side length (px) below which a crop is considered "small" and
+    # will be Lanczos-upscaled to this size before further processing.
+    small_crop_min_side: int = 160
+
+    # Non-local means denoising on the colour image.
+    # Applied before CLAHE so the contrast equaliser does not amplify sensor
+    # noise. h and hColor are the filter strengths; keep low (5) to avoid
+    # over-blurring fine facial features.
+    enable_denoising: bool = True
+
+    # Auto-gamma correction via mean luminance.
+    # Computes gamma = log(0.5) / log(mean/255) and applies x^gamma to the LUT.
+    # For dark images (mean ≈ 40): gamma ≈ 0.32 → x^0.32 lifts shadows.
+    # For mid-tone images (mean ≈ 128): gamma ≈ 1.0 → identity (no-op).
+    enable_gamma_correction: bool = True
+
+    # Unsharp masking — mild high-frequency boost applied after CLAHE.
+    # Recovers edge detail that denoising slightly blurs.
+    # strength=1.5 means: output = 1.5*sharp − 0.5*blurred (net +50% edges).
+    enable_unsharp_mask: bool = True
+    unsharp_strength: float = 1.5
+
     # Database
     postgres_host: str = "localhost"
     postgres_port: int = 5432

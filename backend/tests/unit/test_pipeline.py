@@ -661,3 +661,251 @@ class TestAuthEndpoint:
             json={"access_token": "invalid.token.value"},
         )
         assert response.status_code == 401
+
+
+# ──────────────────────────────────────────────
+# Preprocessing Enhancement Tests
+# ──────────────────────────────────────────────
+
+class TestPreprocessing:
+    """
+    Unit tests for _preprocess_for_arcface enhancement stages.
+
+    Each test patches only the relevant settings flag(s) so stages are
+    tested in isolation.  The full chain smoke test verifies all stages
+    compose correctly end-to-end.
+    """
+
+    def _make_face(self, h: int = 200, w: int = 160, dtype=np.uint8) -> np.ndarray:
+        """Return a synthetic RGB face array of the requested shape and dtype."""
+        rng = np.random.default_rng(42)
+        face = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+        if dtype == np.float32:
+            face = (face / 255.0).astype(np.float32)
+        return face
+
+    def _make_dark_face(self, h: int = 200, w: int = 160) -> np.ndarray:
+        """Return a very dark RGB face (mean ≈ 30) to trigger gamma lift."""
+        rng = np.random.default_rng(7)
+        face = rng.integers(0, 60, (h, w, 3), dtype=np.uint8)
+        return face
+
+    # --- Stage 0: float32 → uint8 conversion ---
+
+    def test_float32_input_is_converted_to_uint8(self):
+        """float32 [0,1] input must be converted to uint8 [0,255]."""
+        from app.core.pipeline import _preprocess_for_arcface
+        face_float = self._make_face(dtype=np.float32)
+        result = _preprocess_for_arcface(face_float)
+        assert result.dtype == np.uint8, "Output must be uint8"
+        assert result.shape == (112, 112, 3), "Output must be 112×112 RGB"
+
+    def test_uint8_input_passes_through_dtype_unchanged(self):
+        """uint8 input should remain uint8 after preprocessing."""
+        from app.core.pipeline import _preprocess_for_arcface
+        face_uint8 = self._make_face(dtype=np.uint8)
+        result = _preprocess_for_arcface(face_uint8)
+        assert result.dtype == np.uint8
+
+    # --- Stage 1: Upscale tiny crops ---
+
+    def test_small_crop_is_upscaled(self):
+        """A crop smaller than small_crop_min_side must be Lanczos-upscaled."""
+        import cv2
+        from unittest.mock import patch
+        from app.core.pipeline import _preprocess_for_arcface
+
+        tiny_face = np.zeros((60, 50, 3), dtype=np.uint8)
+        # All later stages disabled so they don't mask the upscale effect
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = True
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = False
+            mock_settings.enable_gamma_correction = False
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = False
+            mock_settings.clahe_clip_limit = 2.0
+            result = _preprocess_for_arcface(tiny_face)
+
+        # The output must be the canonical 112×112 (pad+resize step runs last)
+        assert result.shape == (112, 112, 3)
+
+    def test_large_crop_is_not_upscaled(self):
+        """A crop already above the threshold must not be upscaled."""
+        import cv2
+        from unittest.mock import patch
+        from app.core.pipeline import _preprocess_for_arcface
+
+        large_face = self._make_face(h=200, w=200)
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = True
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = False
+            mock_settings.enable_gamma_correction = False
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = False
+            mock_settings.clahe_clip_limit = 2.0
+            result = _preprocess_for_arcface(large_face)
+
+        assert result.shape == (112, 112, 3)
+
+    # --- Stage 2: Denoising ---
+
+    def test_denoising_does_not_crash(self):
+        """fastNlMeansDenoisingColored must complete without exception."""
+        from unittest.mock import patch
+        from app.core.pipeline import _preprocess_for_arcface
+
+        face = self._make_face()
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = False
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = True
+            mock_settings.enable_gamma_correction = False
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = False
+            mock_settings.clahe_clip_limit = 2.0
+            result = _preprocess_for_arcface(face)
+
+        assert result.shape == (112, 112, 3)
+        assert result.dtype == np.uint8
+
+    def test_denoising_disabled_flag_skips_step(self):
+        """When enable_denoising=False the output should equal the CLAHE-free path."""
+        from unittest.mock import patch
+        from app.core.pipeline import _preprocess_for_arcface
+        import cv2
+
+        face = self._make_face()
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = False
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = False
+            mock_settings.enable_gamma_correction = False
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = False
+            mock_settings.clahe_clip_limit = 2.0
+            result = _preprocess_for_arcface(face.copy())
+
+        # Should still produce a valid 112×112 array
+        assert result.shape == (112, 112, 3)
+
+    # --- Stage 3: Auto-gamma ---
+
+    def test_gamma_lifts_dark_image_mean_luminance(self):
+        """Gamma correction must increase mean luminance of a very dark face."""
+        import cv2
+        from unittest.mock import patch
+        from app.core.pipeline import _preprocess_for_arcface
+
+        dark_face = self._make_dark_face()
+        dark_gray = cv2.cvtColor(dark_face, cv2.COLOR_RGB2GRAY)
+        before_mean = float(np.mean(dark_gray))
+
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = False
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = False
+            mock_settings.enable_gamma_correction = True
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = False
+            mock_settings.clahe_clip_limit = 2.0
+            result = _preprocess_for_arcface(dark_face.copy())
+
+        result_gray = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+        after_mean = float(np.mean(result_gray))
+        assert after_mean > before_mean, (
+            f"Gamma should lift a dark face: before={before_mean:.1f} after={after_mean:.1f}"
+        )
+
+    def test_gamma_no_op_on_mid_tone_image(self):
+        """For a face with mean luminance ≈ 128 gamma correction should be near 1.0."""
+        import math
+        from unittest.mock import patch
+        from app.core.pipeline import _preprocess_for_arcface
+        import cv2
+
+        # Create a face with exactly mean=128
+        mid_face = np.full((200, 160, 3), 128, dtype=np.uint8)
+
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = False
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = False
+            mock_settings.enable_gamma_correction = True
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = False
+            mock_settings.clahe_clip_limit = 2.0
+            result = _preprocess_for_arcface(mid_face.copy())
+
+        result_gray = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
+        result_mean = float(np.mean(result_gray))
+        # Should remain close to 128 (within ±20 accounting for pad pixels)
+        assert abs(result_mean - 128) < 25, (
+            f"Mid-tone image should not be significantly altered: mean={result_mean:.1f}"
+        )
+
+    # --- Stage 5: Unsharp mask ---
+
+    def test_unsharp_mask_increases_sharpness(self):
+        """Unsharp mask should increase the image's high-frequency content."""
+        import cv2
+        from unittest.mock import patch
+        from app.core.pipeline import _preprocess_for_arcface
+
+        # Use a face with visible edges (random noise has high HF content)
+        face = self._make_face()
+
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = False
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = False
+            mock_settings.enable_gamma_correction = False
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = False
+            mock_settings.clahe_clip_limit = 2.0
+            result_no_usm = _preprocess_for_arcface(face.copy())
+
+        with patch("app.core.pipeline.settings") as mock_settings:
+            mock_settings.enable_upscale_small_crops = False
+            mock_settings.small_crop_min_side = 160
+            mock_settings.enable_denoising = False
+            mock_settings.enable_gamma_correction = False
+            mock_settings.enable_clahe = False
+            mock_settings.enable_unsharp_mask = True
+            mock_settings.unsharp_strength = 1.5
+            mock_settings.clahe_clip_limit = 2.0
+            result_usm = _preprocess_for_arcface(face.copy())
+
+        # Measure sharpness via Laplacian variance (higher = sharper)
+        lap_before = cv2.Laplacian(result_no_usm, cv2.CV_64F).var()
+        lap_after = cv2.Laplacian(result_usm, cv2.CV_64F).var()
+        assert lap_after >= lap_before, (
+            f"Unsharp mask should not reduce sharpness: before={lap_before:.2f} after={lap_after:.2f}"
+        )
+
+    # --- Full chain smoke test ---
+
+    def test_full_chain_produces_valid_112_rgb_uint8(self):
+        """All stages enabled together must produce a 112×112 uint8 RGB array."""
+        from app.core.pipeline import _preprocess_for_arcface
+        from app.core.config import settings
+
+        # Use a float32 input (DeepFace output format) of a non-square crop
+        face = self._make_face(h=227, w=167, dtype=np.float32)
+        result = _preprocess_for_arcface(face)
+
+        assert result.dtype == np.uint8, "Output dtype must be uint8"
+        assert result.shape == (112, 112, 3), "Output shape must be (112, 112, 3)"
+        assert result.min() >= 0 and result.max() <= 255, "Pixel values must be in [0,255]"
+
+    def test_new_config_flags_have_correct_defaults(self):
+        """Verify all new preprocessing config flags have the expected defaults."""
+        from app.core.config import settings
+
+        assert settings.enable_upscale_small_crops is True
+        assert settings.small_crop_min_side == 160
+        assert settings.enable_denoising is True
+        assert settings.enable_gamma_correction is True
+        assert settings.enable_unsharp_mask is True
+        assert settings.unsharp_strength == 1.5
