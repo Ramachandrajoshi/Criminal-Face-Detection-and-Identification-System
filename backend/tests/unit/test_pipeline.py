@@ -226,7 +226,7 @@ class TestSearchPipeline:
             assert result["status"] == "NO_MATCH"
             assert result["matches"] == []
             assert result["query_hash"] is not None
-            mock_verify.assert_called_once()
+            assert mock_verify.call_count == 2
 
     @pytest.mark.asyncio
     async def test_search_match(self, mock_embedding):
@@ -250,7 +250,7 @@ class TestSearchPipeline:
             result = await run_pipeline(file, AsyncMock())
 
             assert result["status"] == "MATCH"
-            assert len(result["matches"]) == 1
+            assert len(result["matches"]) == 2
             assert result["matches"][0]["face_name"] == "John Doe"
             assert result["matches"][0]["distance"] == 0.32
 

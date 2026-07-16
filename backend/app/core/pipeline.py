@@ -130,7 +130,7 @@ def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
 
 # ---------- Stage 2-3: ALIGN + NORMALIZE ----------
 
-def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
+def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
     """
     Prepare an aligned face array for ArcFace embedding extraction.
 
@@ -187,7 +187,7 @@ def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
     # CCTV face crops can be as small as 50×50 px. Upscaling to at least
     # `small_crop_min_side` before enhancement gives the subsequent filters
     # significantly more pixels to work with and reduces blocking artefacts.
-    if settings.enable_upscale_small_crops:
+    if version == 2 and settings.enable_upscale_small_crops:
         h, w = face_bgr.shape[:2]
         min_side = min(h, w)
         if min_side < settings.small_crop_min_side:
@@ -206,7 +206,7 @@ def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
     # Non-local means denoising removes CCTV sensor/compression noise before
     # the contrast equaliser runs. h=5 is conservative — strong enough to
     # smooth noise without blurring eye or lip edges.
-    if settings.enable_denoising:
+    if version == 2 and settings.enable_denoising:
         face_bgr = cv2.fastNlMeansDenoisingColored(
             face_bgr,
             None,
@@ -226,7 +226,7 @@ def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
     #   • Dark image  (μ ≈ 40):  γ ≈ 0.32  → x^0.32  lifts shadows  ✓
     #   • Mid image   (μ ≈ 128): γ ≈ 1.0   → x^1.0   identity       ✓
     #   • Bright image(μ ≈ 220): γ ≈ 4.5   → x^4.5   compresses highlights ✓
-    if settings.enable_gamma_correction:
+    if version == 2 and settings.enable_gamma_correction:
         gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
         mean_lum = float(np.mean(gray))
         if mean_lum > 1.0:  # guard against pure-black frames
@@ -258,19 +258,12 @@ def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
         face_bgr = cv2.cvtColor(face_lab, cv2.COLOR_LAB2BGR)
 
     # ── Step 5: Unsharp mask ─────────────────────────────────────────────────
-    # Recovers the edge detail that fastNlMeansDenoisingColored softens.
-    # Formula: output = strength × sharp − (strength − 1) × blurred
-    # With strength=1.5: output = 1.5 × face − 0.5 × blurred  (+50% edges)
-    # Uses cv2.addWeighted which clamps to uint8 automatically.
-    if settings.enable_unsharp_mask:
+    if version == 2 and settings.enable_unsharp_mask:
         blurred = cv2.GaussianBlur(face_bgr, (0, 0), sigmaX=2.0)
         s = float(settings.unsharp_strength)
         face_bgr = cv2.addWeighted(face_bgr, s, blurred, -(s - 1.0), 0)
 
     # ── Step 6: Pad → 112×112 Lanczos resize ─────────────────────────────────
-    # Convert back to RGB for ArcFace.  Pad to square first to avoid
-    # stretching the face geometry (a direct 112×112 resize on a non-square
-    # crop collapses inter-class distance — see original docstring).
     face = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
     if face.shape[:2] != (112, 112):
         h, w = face.shape[:2]
@@ -286,7 +279,7 @@ def _preprocess_for_arcface(face: np.ndarray) -> np.ndarray:
 
 
 # ---------- Stage 4: REPRESENT ----------
-def extract_embedding(aligned_face: np.ndarray) -> Optional[np.ndarray]:
+def extract_embedding(aligned_face: np.ndarray, version: int = 2) -> Optional[np.ndarray]:
     """
     Extract a 512-d ArcFace embedding from an aligned face image.
     Returns L2-normalised numpy array or None on failure.
@@ -301,18 +294,17 @@ def extract_embedding(aligned_face: np.ndarray) -> Optional[np.ndarray]:
     valid but not aligned with the model weights, increasing intra-class
     variance (= higher same-person distance).
     """
-    from deepface import DeepFace
-
-    # Run Stage 2-3 preprocessing before handing off to the ArcFace model.
-    face = _preprocess_for_arcface(aligned_face)
-
     try:
+        from deepface import DeepFace
+
+        processed_face = _preprocess_for_arcface(aligned_face, version=version)
+
         result = DeepFace.represent(
-            img_path=face,
+            img_path=processed_face,
             model_name=settings.deepface_model,
             detector_backend="skip",       # already aligned + preprocessed
             enforce_detection=False,
-            normalization=settings.arcface_normalization,   # "ArcFace" = (x-127.5)/128
+            normalization=settings.arcface_normalization,
         )
     except Exception as exc:
         logger.error("Embedding extraction failed: %s", exc)
@@ -341,6 +333,7 @@ async def verify_match(
     threshold: Optional[float] = None,
     limit: int = 10,
     tenant_id: Optional[int] = None,
+    target_version: Optional[int] = None,
 ) -> list[dict]:
     """
     Execute pgvector cosine ANN query with the given embedding.
@@ -355,6 +348,7 @@ async def verify_match(
         threshold=threshold,
         limit=limit,
         tenant_id=tenant_id if tenant_id is not None else 1,
+        target_version=target_version,
     )
 
     for m in matches:
@@ -445,14 +439,27 @@ async def run_pipeline(
         return {"status": "ERROR", "error": "No face detected", "matches": []}
 
     # ── Stage 4: Represent ────────────────────────────────────────
-    embedding = extract_embedding(aligned)
-    if embedding is None:
+    # Extract dual embeddings for seamless migration
+    embedding_v2 = extract_embedding(aligned, version=2)
+    embedding_v1 = extract_embedding(aligned, version=1)
+    
+    if embedding_v2 is None or embedding_v1 is None:
         return {"status": "ERROR", "error": "Embedding extraction failed", "matches": []}
 
-    query_hash = compute_query_hash(embedding.tobytes())
+    # We use v2 hash for the primary audit trail
+    query_hash = compute_query_hash(embedding_v2.tobytes())
 
     # ── Stage 5: Verify ───────────────────────────────────────────
-    matches = await verify_match(embedding, session, limit=limit, tenant_id=tenant_id)
+    import asyncio
+    
+    matches_v2, matches_v1 = await asyncio.gather(
+        verify_match(embedding_v2, session, limit=limit, tenant_id=tenant_id, target_version=2),
+        verify_match(embedding_v1, session, limit=limit, tenant_id=tenant_id, target_version=1),
+    )
+
+    all_matches = matches_v2 + matches_v1
+    all_matches.sort(key=lambda m: m["distance"])
+    matches = all_matches[:limit]
 
     if matches:
         return {
