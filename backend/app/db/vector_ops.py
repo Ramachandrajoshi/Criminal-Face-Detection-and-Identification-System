@@ -24,6 +24,7 @@ async def cosine_ann_query(
     threshold: Optional[float] = None,
     limit: int = 10,
     tenant_id: int = 1,
+    target_version: Optional[int] = None,
 ) -> list[dict]:
     """
     Perform approximate nearest-neighbour cosine similarity search
@@ -48,9 +49,10 @@ async def cosine_ann_query(
     vec_str = f"[{','.join(f'{v:.10f}' for v in query_vector)}]"
 
     # Cosine distance via <=> operator (lower is better match)
-    # Filter: distance <= threshold (e.g., 0.58) AND tenant_id match
+    # Filter: distance <= threshold AND tenant_id match AND (optional) version match
+    version_filter = "AND embedding_version = :target_version" if target_version is not None else ""
     sql = text(
-        """
+        f"""
         SELECT
             id,
             face_name,
@@ -60,6 +62,7 @@ async def cosine_ann_query(
         FROM face_profiles
         WHERE (face_embedding <=> :vec) <= :threshold
           AND tenant_id = :tenant_id
+          {version_filter}
         ORDER BY distance ASC
         LIMIT :limit
         """
@@ -67,7 +70,13 @@ async def cosine_ann_query(
 
     result = await session.execute(
         sql,
-        {"vec": vec_str, "threshold": threshold, "limit": limit, "tenant_id": tenant_id},
+        {
+            "vec": vec_str, 
+            "threshold": threshold, 
+            "limit": limit, 
+            "tenant_id": tenant_id,
+            "target_version": target_version
+        },
     )
 
     rows = []
