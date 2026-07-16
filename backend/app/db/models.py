@@ -39,6 +39,7 @@ class FaceProfile(Base):
     face_embedding = Column(Text, nullable=False)
     face_embedding_enc = Column(LargeBinary, nullable=True)
     tenant_id = Column(Integer, nullable=False, server_default=text("1"))
+    embedding_version = Column(Integer, nullable=False, server_default=text("1"))
     # TIMESTAMPTZ — must use timezone=True so asyncpg accepts tz-aware datetimes
     created_at = Column(DateTime(timezone=True), default=_utcnow)
 

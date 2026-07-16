@@ -131,6 +131,7 @@ async def search_face(
             face_name=m["face_name"],
             alias=m["alias"],
             distance=m["distance"],
+            embedding_version=m.get("embedding_version", 1),
         )
         for m in result.get("matches", [])
     ]
@@ -345,9 +346,10 @@ async def search_faces_batch_stream(
             matches_out = [
                 {
                     "id": m["id"],
-                    "suspectName": m["person_name"],
+                    "suspectName": m.get("face_name", m.get("person_name")),
                     "alias": m.get("alias"),
                     "distance": m["distance"],
+                    "embeddingVersion": m.get("embedding_version", 1),
                 }
                 for m in result.get("matches", [])
             ]

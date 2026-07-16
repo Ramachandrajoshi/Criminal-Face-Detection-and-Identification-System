@@ -464,6 +464,7 @@ async def list_faces(
             FaceProfileModel.face_name,
             FaceProfileModel.alias,
             FaceProfileModel.demographics,
+            FaceProfileModel.embedding_version,
             FaceProfileModel.created_at,
             FaceProfileModel.tenant_id,
         ).where(FaceProfileModel.tenant_id == tenant_id).order_by(FaceProfileModel.id.desc())
@@ -475,6 +476,7 @@ async def list_faces(
             face_name=r.face_name,
             alias=r.alias,
             demographics=r.demographics,
+            embedding_version=r.embedding_version,
             created_at=r.created_at.isoformat() if r.created_at else "",
             tenant_id=r.tenant_id,
         )
@@ -496,6 +498,7 @@ async def get_face(
             FaceProfileModel.face_name,
             FaceProfileModel.alias,
             FaceProfileModel.demographics,
+            FaceProfileModel.embedding_version,
             FaceProfileModel.created_at,
             FaceProfileModel.tenant_id,
         ).where(FaceProfileModel.id == face_id, FaceProfileModel.tenant_id == tenant_id)
@@ -508,6 +511,7 @@ async def get_face(
         face_name=row.face_name,
         alias=row.alias,
         demographics=row.demographics,
+        embedding_version=row.embedding_version,
         created_at=row.created_at.isoformat() if row.created_at else "",
         tenant_id=row.tenant_id,
     )
@@ -547,6 +551,7 @@ async def update_face(
         face_name=face.face_name,
         alias=face.alias,
         demographics=face.demographics,
+        embedding_version=face.embedding_version,
         created_at=face.created_at.isoformat() if face.created_at else "",
         tenant_id=face.tenant_id,
     )
