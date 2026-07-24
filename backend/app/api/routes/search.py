@@ -226,6 +226,71 @@ def _search_sse_event(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
+async def _process_search_file(
+    file: UploadFile,
+    gps_lat: Optional[float],
+    gps_lon: Optional[float],
+    limit: int,
+    tenant_id: int,
+    semaphore: asyncio.Semaphore,
+) -> dict:
+    """
+    Validate + search a single batch file, bounded by ``semaphore``.
+    Never raises — always returns a dict describing the outcome.
+    """
+    filename = file.filename or "unknown"
+    file_start = time.perf_counter()
+
+    async with semaphore:
+        if not file.content_type or file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+            return {
+                "filename": filename, "status": "ERROR", "queryHash": "", "matches": [],
+                "alertId": None, "fileMs": int((time.perf_counter() - file_start) * 1000),
+                "error": f"Unsupported MIME type: {file.content_type}",
+            }
+
+        content = await file.read()
+        if len(content) > 5 * 1024 * 1024:
+            return {
+                "filename": filename, "status": "ERROR", "queryHash": "", "matches": [],
+                "alertId": None, "fileMs": int((time.perf_counter() - file_start) * 1000),
+                "error": "Image exceeds 5 MB limit",
+            }
+
+        try:
+            validate_image_dimensions(content)
+        except ValueError as exc:
+            return {
+                "filename": filename, "status": "ERROR", "queryHash": "", "matches": [],
+                "alertId": None, "fileMs": int((time.perf_counter() - file_start) * 1000),
+                "error": str(exc),
+            }
+
+        file.file.seek(0)
+        result = await _search_one(file, gps_lat, gps_lon, limit, tenant_id=tenant_id)
+
+        matches_out = [
+            {
+                "id": m["id"],
+                "suspectName": m.get("face_name", m.get("person_name")),
+                "alias": m.get("alias"),
+                "distance": m["distance"],
+                "embeddingVersion": m.get("embedding_version", 1),
+            }
+            for m in result.get("matches", [])
+        ]
+
+        return {
+            "filename": filename,
+            "status": result["status"],
+            "queryHash": result.get("query_hash", ""),
+            "matches": matches_out,
+            "alertId": result.get("alert_id"),
+            "fileMs": int((time.perf_counter() - file_start) * 1000),
+            "error": result.get("error"),
+        }
+
+
 @router.post("/search/batch/stream")
 async def search_faces_batch_stream(
     files: List[UploadFile] = File(
@@ -240,8 +305,12 @@ async def search_faces_batch_stream(
     """
     Batch face search using Server-Sent Events (SSE).
 
-    Processes up to 20 images sequentially through the full 5-stage pipeline.
-    Emits one SSE progress event per file the moment it completes.
+    Processes up to 20 images concurrently (bounded by
+    ``settings.batch_pipeline_concurrency``) through the full 5-stage
+    pipeline. Emits one SSE progress event per file the moment it completes —
+    **completion order is not the same as submission order** since files run
+    concurrently; each event carries its own ``filename`` so clients should
+    key off that rather than assuming order.
     Each MATCH creates an alert (status PENDING_REVIEW) and an audit log entry.
     is_live_capture is always False for batch photo uploads.
     """
@@ -262,79 +331,17 @@ async def search_faces_batch_stream(
         no_match = 0
         errors = 0
 
-        for file in files:
-            filename = file.filename or "unknown"
-            file_start = time.perf_counter()
+        semaphore = asyncio.Semaphore(settings.batch_pipeline_concurrency)
+        tasks = [
+            asyncio.create_task(_process_search_file(f, gps_lat, gps_lon, limit, tenant_id, semaphore))
+            for f in files
+        ]
 
-            # Validate MIME type
-            if not file.content_type or file.content_type not in ("image/jpeg", "image/png", "image/jpg"):
-                processed += 1
-                errors += 1
-                yield _search_sse_event({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": total,
-                    "filename": filename,
-                    "status": "ERROR",
-                    "queryHash": "",
-                    "matches": [],
-                    "alertId": None,
-                    "elapsedMs": int((time.perf_counter() - batch_start) * 1000),
-                    "fileMs": int((time.perf_counter() - file_start) * 1000),
-                    "error": f"Unsupported MIME type: {file.content_type}",
-                })
-                await asyncio.sleep(0)
-                continue
-
-            content = await file.read()
-            if len(content) > 5 * 1024 * 1024:
-                processed += 1
-                errors += 1
-                yield _search_sse_event({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": total,
-                    "filename": filename,
-                    "status": "ERROR",
-                    "queryHash": "",
-                    "matches": [],
-                    "alertId": None,
-                    "elapsedMs": int((time.perf_counter() - batch_start) * 1000),
-                    "fileMs": int((time.perf_counter() - file_start) * 1000),
-                    "error": "Image exceeds 5 MB limit",
-                })
-                await asyncio.sleep(0)
-                continue
-
-            try:
-                validate_image_dimensions(content)
-            except ValueError as exc:
-                processed += 1
-                errors += 1
-                yield _search_sse_event({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": total,
-                    "filename": filename,
-                    "status": "ERROR",
-                    "queryHash": "",
-                    "matches": [],
-                    "alertId": None,
-                    "elapsedMs": int((time.perf_counter() - batch_start) * 1000),
-                    "fileMs": int((time.perf_counter() - file_start) * 1000),
-                    "error": str(exc),
-                })
-                await asyncio.sleep(0)
-                continue
-
-            file.file.seek(0)
-            result = await _search_one(file, gps_lat, gps_lon, limit, tenant_id=tenant_id)
-
-            file_ms = int((time.perf_counter() - file_start) * 1000)
-            elapsed_ms = int((time.perf_counter() - batch_start) * 1000)
+        for coro in asyncio.as_completed(tasks):
+            file_result = await coro
             processed += 1
 
-            status = result["status"]
+            status = file_result["status"]
             if status == "MATCH":
                 matched += 1
             elif status == "NO_MATCH":
@@ -342,30 +349,18 @@ async def search_faces_batch_stream(
             else:
                 errors += 1
 
-            # Serialize matches to plain dicts for JSON
-            matches_out = [
-                {
-                    "id": m["id"],
-                    "suspectName": m.get("face_name", m.get("person_name")),
-                    "alias": m.get("alias"),
-                    "distance": m["distance"],
-                    "embeddingVersion": m.get("embedding_version", 1),
-                }
-                for m in result.get("matches", [])
-            ]
-
             yield _search_sse_event({
                 "type": "progress",
                 "processed": processed,
                 "total": total,
-                "filename": filename,
+                "filename": file_result["filename"],
                 "status": status,
-                "queryHash": result.get("query_hash", ""),
-                "matches": matches_out,
-                "alertId": result.get("alert_id"),
-                "elapsedMs": elapsed_ms,
-                "fileMs": file_ms,
-                "error": result.get("error"),
+                "queryHash": file_result["queryHash"],
+                "matches": file_result["matches"],
+                "alertId": file_result["alertId"],
+                "elapsedMs": int((time.perf_counter() - batch_start) * 1000),
+                "fileMs": file_result["fileMs"],
+                "error": file_result["error"],
             })
             await asyncio.sleep(0)
 
