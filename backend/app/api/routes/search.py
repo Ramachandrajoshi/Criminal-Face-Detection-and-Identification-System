@@ -132,6 +132,7 @@ async def search_face(
             alias=m["alias"],
             distance=m["distance"],
             embedding_version=m.get("embedding_version", 1),
+            tenant_id=m.get("tenant_id", tenant_id),
         )
         for m in result.get("matches", [])
     ]
@@ -276,6 +277,7 @@ async def _process_search_file(
                 "alias": m.get("alias"),
                 "distance": m["distance"],
                 "embeddingVersion": m.get("embedding_version", 1),
+                "tenantId": m.get("tenant_id", tenant_id),
             }
             for m in result.get("matches", [])
         ]
