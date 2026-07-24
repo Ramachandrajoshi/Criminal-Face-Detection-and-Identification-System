@@ -23,6 +23,7 @@ Therefore:
     live camera input.  Photo uploads pass ``enforce_liveness=False``.
 """
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -30,6 +31,7 @@ import numpy as np
 from fastapi import UploadFile
 
 from app.core.config import settings
+from app.core.inference_executor import get_executor
 from app.db.vector_ops import compute_query_hash
 
 logger = logging.getLogger(__name__)
@@ -419,10 +421,13 @@ async def run_pipeline(
       query_hash   — SHA-256 of the embedding (or empty-bytes hash on block)
     """
     content = await file.read()
+    loop = asyncio.get_running_loop()
+    executor = get_executor()
 
     # ── Liveness gate (camera only) ───────────────────────────────
     if enforce_liveness:
-        if not check_liveness_on_bytes(content):
+        is_live = await loop.run_in_executor(executor, check_liveness_on_bytes, content)
+        if not is_live:
             query_hash = compute_query_hash(b"")
             await _add_spoof_audit(session, query_hash, gps_lat=gps_lat, gps_lon=gps_lon, tenant_id=tenant_id)
             return {
@@ -434,15 +439,18 @@ async def run_pipeline(
             }
 
     # ── Stage 1: Detect ───────────────────────────────────────────
-    aligned = detect_face(content)
+    aligned = await loop.run_in_executor(executor, detect_face, content)
     if aligned is None:
         return {"status": "ERROR", "error": "No face detected", "matches": []}
 
     # ── Stage 4: Represent ────────────────────────────────────────
-    # Extract dual embeddings for seamless migration
-    embedding_v2 = extract_embedding(aligned, version=2)
-    embedding_v1 = extract_embedding(aligned, version=1)
-    
+    # Extract dual embeddings for seamless migration — independent, so run
+    # them concurrently on the inference pool rather than sequentially.
+    embedding_v2, embedding_v1 = await asyncio.gather(
+        loop.run_in_executor(executor, extract_embedding, aligned, 2),
+        loop.run_in_executor(executor, extract_embedding, aligned, 1),
+    )
+
     if embedding_v2 is None or embedding_v1 is None:
         return {"status": "ERROR", "error": "Embedding extraction failed", "matches": []}
 
@@ -450,8 +458,6 @@ async def run_pipeline(
     query_hash = compute_query_hash(embedding_v2.tobytes())
 
     # ── Stage 5: Verify ───────────────────────────────────────────
-    import asyncio
-    
     matches_v2, matches_v1 = await asyncio.gather(
         verify_match(embedding_v2, session, limit=limit, tenant_id=tenant_id, target_version=2),
         verify_match(embedding_v1, session, limit=limit, tenant_id=tenant_id, target_version=1),
@@ -499,14 +505,16 @@ async def register_pipeline(
     Returns a dict with keys: status, profile_id, query_hash, embedding_dim.
     """
     content = await file.read()
+    loop = asyncio.get_running_loop()
+    executor = get_executor()
 
     # Stage 1: Detect
-    aligned = detect_face(content)
+    aligned = await loop.run_in_executor(executor, detect_face, content)
     if aligned is None:
         return {"status": "ERROR", "error": "No face detected in the uploaded image"}
 
     # Stage 4: Represent
-    embedding = extract_embedding(aligned)
+    embedding = await loop.run_in_executor(executor, extract_embedding, aligned)
     if embedding is None:
         return {"status": "ERROR", "error": "Embedding extraction failed"}
 
@@ -553,14 +561,16 @@ async def reenroll_pipeline(
       embedding_dim — 512 for ArcFace
     """
     content = await file.read()
+    loop = asyncio.get_running_loop()
+    executor = get_executor()
 
     # Stage 1: Detect
-    aligned = detect_face(content)
+    aligned = await loop.run_in_executor(executor, detect_face, content)
     if aligned is None:
         return {"status": "ERROR", "error": "No face detected in the uploaded image"}
 
     # Stage 4: Represent
-    embedding = extract_embedding(aligned)
+    embedding = await loop.run_in_executor(executor, extract_embedding, aligned)
     if embedding is None:
         return {"status": "ERROR", "error": "Embedding extraction failed"}
 

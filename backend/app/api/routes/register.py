@@ -33,6 +33,7 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
+from app.core.config import settings
 from app.core.pipeline import reenroll_pipeline, register_pipeline
 from app.core.validation import validate_image_dimensions
 from app.db.models import FaceProfile as FaceProfileModel
@@ -195,6 +196,58 @@ async def _register_one(
             return {"status": "ERROR", "error": str(exc)}
 
 
+# ── Shared helper: validate + register one file, bounded by a semaphore ──
+
+
+async def _process_register_file(
+    file: UploadFile,
+    alias: Optional[str],
+    demographics_dict: Optional[dict],
+    tenant_id: int,
+    semaphore: asyncio.Semaphore,
+) -> dict:
+    """
+    Validate and register a single batch file, bounded by ``semaphore``.
+    Never raises — always returns a dict describing the outcome.
+    """
+    filename = file.filename or "unknown"
+    face_name = _name_from_filename(filename)
+    file_start = time.perf_counter()
+
+    async with semaphore:
+        content, err = await _validate_file(file)
+        if err:
+            return {
+                "filename": filename, "faceName": face_name, "status": "ERROR",
+                "profileId": None, "error": err,
+                "fileMs": int((time.perf_counter() - file_start) * 1000),
+            }
+
+        file.file.seek(0)
+        try:
+            result = await _register_one(file, face_name, alias, demographics_dict, tenant_id=tenant_id)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Unexpected error registering %s", filename)
+            return {
+                "filename": filename, "faceName": face_name, "status": "ERROR",
+                "profileId": None, "error": str(exc),
+                "fileMs": int((time.perf_counter() - file_start) * 1000),
+            }
+
+        if result["status"] in ("ERROR", "SPOOF_BLOCKED"):
+            return {
+                "filename": filename, "faceName": face_name, "status": result["status"],
+                "profileId": None, "error": result.get("error"),
+                "fileMs": int((time.perf_counter() - file_start) * 1000),
+            }
+
+        return {
+            "filename": filename, "faceName": face_name, "status": "REGISTERED",
+            "profileId": result.get("profile_id"), "error": None,
+            "fileMs": int((time.perf_counter() - file_start) * 1000),
+        }
+
+
 # ── Batch registration (JSON response, no streaming) ─────────────
 
 
@@ -214,7 +267,9 @@ async def register_faces_batch(
 
     Note: no DI session is injected here — each file gets its own session
     via ``_register_one`` to avoid holding a connection open for the full
-    batch duration.
+    batch duration. Files are processed concurrently, bounded by
+    ``settings.batch_pipeline_concurrency``; ``asyncio.gather`` preserves
+    input order in the returned list regardless of completion order.
     """
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
@@ -228,41 +283,22 @@ async def register_faces_batch(
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid demographics JSON")
 
-    results: list[dict] = []
+    semaphore = asyncio.Semaphore(settings.batch_pipeline_concurrency)
+    file_results = await asyncio.gather(*[
+        _process_register_file(f, alias, demographics_dict, tenant_id, semaphore)
+        for f in files
+    ])
 
-    for file in files:
-        filename = file.filename or "unknown"
-        face_name = _name_from_filename(filename)
-
-        content, err = await _validate_file(file)
-        if err:
-            results.append({
-                "filename": filename, "status": "ERROR",
-                "profileId": None, "faceName": face_name, "error": err,
-            })
-            continue
-
-        file.file.seek(0)
-        try:
-            result = await _register_one(file, face_name, alias, demographics_dict, tenant_id=tenant_id)
-        except Exception as exc:  # pragma: no cover
-            logger.exception("Unexpected error registering %s", filename)
-            results.append({
-                "filename": filename, "status": "ERROR",
-                "profileId": None, "faceName": face_name, "error": str(exc),
-            })
-            continue
-
-        if result["status"] in ("ERROR", "SPOOF_BLOCKED"):
-            results.append({
-                "filename": filename, "status": result["status"],
-                "profileId": None, "faceName": face_name, "error": result.get("error"),
-            })
-        else:
-            results.append({
-                "filename": filename, "status": "REGISTERED",
-                "profileId": result.get("profile_id"), "faceName": face_name, "error": None,
-            })
+    results: list[dict] = [
+        {
+            "filename": r["filename"],
+            "status": r["status"],
+            "profileId": r["profileId"],
+            "faceName": r["faceName"],
+            "error": r["error"],
+        }
+        for r in file_results
+    ]
 
     registered = sum(1 for r in results if r["status"] == "REGISTERED")
     return {
@@ -289,9 +325,13 @@ async def register_faces_batch_stream(
     """
     Streaming batch-register using Server-Sent Events (SSE).
 
-    Processes files sequentially and emits one ``data:`` event per file the
-    moment it completes.  The client reads these events to render a live
-    progress bar with ETA.
+    Processes files concurrently (bounded by
+    ``settings.batch_pipeline_concurrency``) and emits one ``data:`` event
+    per file the moment it completes.  The client reads these events to
+    render a live progress bar with ETA. **Completion order is not the same
+    as submission order** since files run concurrently — each event carries
+    its own ``filename`` so clients should key off that rather than
+    assuming order.
 
     **Important**: no ``session`` is injected via DI here.  Each file
     registration uses its own short-lived session from ``_register_one()``.
@@ -340,88 +380,35 @@ async def register_faces_batch_stream(
         registered = 0
         failed = 0
 
-        for file in files:
-            filename = file.filename or "unknown"
-            face_name = _name_from_filename(filename)
-            file_start = time.perf_counter()
+        semaphore = asyncio.Semaphore(settings.batch_pipeline_concurrency)
+        tasks = [
+            asyncio.create_task(_process_register_file(f, alias, demographics_dict, tenant_id, semaphore))
+            for f in files
+        ]
 
-            # ── Validate ─────────────────────────────────────────
-            content, err = await _validate_file(file)
-            if err:
-                processed += 1
-                failed += 1
-                yield _sse_event({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": total,
-                    "filename": filename,
-                    "faceName": face_name,
-                    "status": "ERROR",
-                    "profileId": None,
-                    "error": err,
-                    "elapsedMs": int((time.perf_counter() - batch_start) * 1000),
-                    "fileMs": int((time.perf_counter() - file_start) * 1000),
-                })
-                await asyncio.sleep(0)
-                continue
-
-            # ── Pipeline (own session per file) ──────────────────
-            file.file.seek(0)
-            try:
-                result = await _register_one(file, face_name, alias, demographics_dict, tenant_id=tenant_id)
-            except Exception as exc:  # pragma: no cover
-                logger.exception("Unexpected error registering %s", filename)
-                processed += 1
-                failed += 1
-                yield _sse_event({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": total,
-                    "filename": filename,
-                    "faceName": face_name,
-                    "status": "ERROR",
-                    "profileId": None,
-                    "error": str(exc),
-                    "elapsedMs": int((time.perf_counter() - batch_start) * 1000),
-                    "fileMs": int((time.perf_counter() - file_start) * 1000),
-                })
-                await asyncio.sleep(0)
-                continue
-
-            file_ms = int((time.perf_counter() - file_start) * 1000)
-            elapsed_ms = int((time.perf_counter() - batch_start) * 1000)
+        for coro in asyncio.as_completed(tasks):
+            file_result = await coro
             processed += 1
 
-            if result["status"] in ("ERROR", "SPOOF_BLOCKED"):
-                failed += 1
-                yield _sse_event({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": total,
-                    "filename": filename,
-                    "faceName": face_name,
-                    "status": result["status"],
-                    "profileId": None,
-                    "error": result.get("error"),
-                    "elapsedMs": elapsed_ms,
-                    "fileMs": file_ms,
-                })
-            else:
+            status = file_result["status"]
+            if status == "REGISTERED":
                 registered += 1
-                yield _sse_event({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": total,
-                    "filename": filename,
-                    "faceName": face_name,
-                    "status": "REGISTERED",
-                    "profileId": result.get("profile_id"),
-                    "error": None,
-                    "elapsedMs": elapsed_ms,
-                    "fileMs": file_ms,
-                })
+            else:
+                failed += 1
 
-            await asyncio.sleep(0)   # yield to event loop between files
+            yield _sse_event({
+                "type": "progress",
+                "processed": processed,
+                "total": total,
+                "filename": file_result["filename"],
+                "faceName": file_result["faceName"],
+                "status": status,
+                "profileId": file_result["profileId"],
+                "error": file_result["error"],
+                "elapsedMs": int((time.perf_counter() - batch_start) * 1000),
+                "fileMs": file_result["fileMs"],
+            })
+            await asyncio.sleep(0)
 
         # ── Final summary event ───────────────────────────────────
         total_ms = int((time.perf_counter() - batch_start) * 1000)

@@ -86,6 +86,16 @@ class Settings(BaseSettings):
     # without a CUDA-capable GPU or NVIDIA Container Toolkit).
     enable_gpu: bool = True
 
+    # Size of the dedicated thread pool used to offload blocking DeepFace/OpenCV
+    # calls off the event loop (see app/core/inference_executor.py). Bounds how
+    # many detect/embed calls run concurrently against the shared GPU. Tune via
+    # load testing (watch nvidia-smi + p95 latency) rather than guessing high.
+    inference_pool_size: int = 3
+    # Max concurrent per-file pipeline calls inside batch SSE endpoints. Should
+    # generally track inference_pool_size since each concurrent batch file
+    # consumes one inference-pool slot.
+    batch_pipeline_concurrency: int = 3
+
     # CORS (allow frontend dev server)
     allowed_origins: list[str] = ["*"]
 

@@ -2,13 +2,16 @@
 FastAPI entry point — Criminal Face Detection & Identification System.
 """
 
+import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.inference_executor import get_executor
 from app.core.middleware import AuthMiddleware
 from app.db.migrations.runner import run_migrations
 from app.db.session import async_session_factory
@@ -82,11 +85,64 @@ def _configure_gpu() -> None:
         )
 
 
+# ── Model warm-up ────────────────────────────────────────────────
+def _warmup_models() -> None:
+    """
+    Force DeepFace to load its model weights before the app accepts traffic.
+
+    Without this, the first real request after boot pays full model-load
+    latency for RetinaFace/MTCNN/OpenCV (detector) and ArcFace (embedding).
+    Running this synchronously on the inference executor — and awaiting it
+    to completion before ``yield`` in ``lifespan`` — also closes a benign
+    cold-start race: DeepFace's internal model cache is a plain dict with no
+    lock, so two concurrent first-requests could otherwise both miss the
+    cache and double-load weights into GPU memory.
+
+    Never raises: a warm-up failure should log a warning, not block startup
+    (mirrors ``_configure_gpu``'s fail-open behaviour). Falls back to a
+    synthetic image for detector warm-up since no real face fixture ships
+    with the repo — DeepFace still builds/loads each detector backend's
+    model before it can determine "no face found", so this reaches the
+    weights-loaded end state without needing a real photo.
+    """
+    start = time.perf_counter()
+
+    try:
+        from deepface import DeepFace
+
+        DeepFace.build_model(settings.deepface_model)
+        logger.info("Warmed embedding model '%s'", settings.deepface_model)
+    except Exception as exc:  # noqa: BLE001 — warm-up must never crash startup
+        logger.warning("Embedding model warm-up failed (%s) — will load lazily on first request", exc)
+
+    try:
+        import cv2
+        import numpy as np
+
+        from app.core.pipeline import detect_face
+
+        dummy = np.random.randint(0, 255, (320, 320, 3), dtype=np.uint8)
+        ok, buf = cv2.imencode(".jpg", dummy)
+        if ok:
+            detect_face(buf.tobytes())  # discards result; only weight-loading matters here
+            logger.info("Warmed detector backends")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Detector warm-up failed (%s) — will load lazily on first request", exc)
+
+    logger.info("Model warm-up finished in %.0fms", (time.perf_counter() - start) * 1000)
+
+
 # ── Lifespan ─────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Criminal Face Detection System starting on %s:%d", settings.api_host, settings.api_port)
     _configure_gpu()   # configure GPU/CPU before any TF model is loaded
+
+    # Warm up DeepFace models on the same executor used at request time, so
+    # the first-ever model load happens pre-traffic on an "inference" thread
+    # rather than lazily on whichever thread handles the first request.
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(get_executor(), _warmup_models)
 
     # ── Run pending migrations ─────────────────────────────────────
     try:

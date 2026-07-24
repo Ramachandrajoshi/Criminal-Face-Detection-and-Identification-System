@@ -71,4 +71,9 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Production default: single worker — the GPU is shared (see docker-compose.yml)
+# and each additional worker process would load its own copy of the
+# RetinaFace/ArcFace weights into VRAM; concurrency instead comes from the
+# in-process inference thread pool (app/core/inference_executor.py). No
+# --reload (dev-only; overridden locally via docker-compose.override.yml).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

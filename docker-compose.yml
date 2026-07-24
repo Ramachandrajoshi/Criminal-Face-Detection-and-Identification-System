@@ -1,3 +1,14 @@
+# PROD-SAFE BASE FILE ──────────────────────────────────────────────────────
+# This file (plus Dockerfile's default CMD) is the production configuration:
+# single uvicorn worker, no --reload, no source bind-mount — the backend runs
+# the code baked into the image at build time.
+#
+# For local development (live source reload), `docker compose up` picks up
+# `docker-compose.override.yml` automatically if present in this directory —
+# it re-adds --reload and a bind-mount of ./backend. To run the pure prod
+# config even with that file present, use:
+#   docker compose -f docker-compose.yml up
+#
 # GPU NOTE ─────────────────────────────────────────────────────────────────
 # The backend service requests GPU access via the 'deploy.resources' block.
 # For this to work the HOST machine must have:
@@ -53,8 +64,6 @@ services:
     networks:
       - criminal_net
     volumes:
-      - ./backend:/app
-      - /app/__pycache__
       - ./db:/app/db:ro
 
   frontend:
