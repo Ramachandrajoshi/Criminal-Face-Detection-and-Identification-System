@@ -229,3 +229,121 @@ class TestSpoofBlockedPath:
 
             assert len(liveness_called) == 0
 
+
+class _FakeVideoCapture:
+    """Stand-in for cv2.VideoCapture, driven entirely by constructor args."""
+
+    def __init__(self, fps=10.0, total_frames=40, opens=True):
+        self._fps = fps
+        self._total_frames = total_frames
+        self._opens = opens
+
+    def isOpened(self):
+        return self._opens
+
+    def get(self, prop):
+        import cv2
+        if prop == cv2.CAP_PROP_FPS:
+            return self._fps
+        if prop == cv2.CAP_PROP_FRAME_COUNT:
+            return self._total_frames
+        return 0
+
+    def set(self, prop, value):
+        pass
+
+    def read(self):
+        return True, np.zeros((10, 10, 3), dtype=np.uint8)
+
+    def release(self):
+        pass
+
+
+class TestVideoLiveness:
+    """Test analyze_video_liveness: multi-frame video anti-spoofing."""
+
+    def test_video_within_duration_majority_live_is_live(self):
+        """~4s clip where most sampled frames score live → is_live True."""
+        fake_cap = _FakeVideoCapture(fps=10.0, total_frames=40)  # 4.0s
+        spoof_scores = iter([0.1, 0.2, 0.1, 0.3, 0.1, 0.2])
+
+        with patch("cv2.VideoCapture", return_value=fake_cap), \
+             patch("app.core.liveness.check_liveness_with_deepface",
+                   side_effect=lambda b: {"is_live": True, "spoof_probability": next(spoof_scores)}):
+            from app.core.liveness import analyze_video_liveness
+            result = analyze_video_liveness(b"fake video bytes")
+
+        assert result["is_live"] is True
+        assert "error" not in result
+        assert result["frames_analyzed"] > 0
+        assert result["spoof_probability"] < 0.5
+
+    def test_video_within_duration_majority_spoof_is_not_live(self):
+        """~4s clip where most sampled frames score spoof → is_live False."""
+        fake_cap = _FakeVideoCapture(fps=10.0, total_frames=40)  # 4.0s
+
+        with patch("cv2.VideoCapture", return_value=fake_cap), \
+             patch("app.core.liveness.check_liveness_with_deepface",
+                   return_value={"is_live": False, "spoof_probability": 0.95}):
+            from app.core.liveness import analyze_video_liveness
+            result = analyze_video_liveness(b"fake video bytes")
+
+        assert result["is_live"] is False
+        assert result["spoof_probability"] > 0.5
+
+    def test_video_too_short_is_rejected(self):
+        """Clip shorter than min_duration_sec should short-circuit with an error."""
+        fake_cap = _FakeVideoCapture(fps=10.0, total_frames=10)  # 1.0s
+
+        with patch("cv2.VideoCapture", return_value=fake_cap):
+            from app.core.liveness import analyze_video_liveness
+            result = analyze_video_liveness(b"fake video bytes")
+
+        assert result["is_live"] is False
+        assert result["error"] == "duration_out_of_range"
+        assert result["frames_analyzed"] == 0
+
+    def test_video_too_long_is_rejected(self):
+        """Clip longer than max_duration_sec should short-circuit with an error."""
+        fake_cap = _FakeVideoCapture(fps=10.0, total_frames=100)  # 10.0s
+
+        with patch("cv2.VideoCapture", return_value=fake_cap):
+            from app.core.liveness import analyze_video_liveness
+            result = analyze_video_liveness(b"fake video bytes")
+
+        assert result["is_live"] is False
+        assert result["error"] == "duration_out_of_range"
+
+    def test_unopenable_video_is_invalid(self):
+        """A corrupt/undecodable file should return an invalid_video error."""
+        fake_cap = _FakeVideoCapture(opens=False)
+
+        with patch("cv2.VideoCapture", return_value=fake_cap):
+            from app.core.liveness import analyze_video_liveness
+            result = analyze_video_liveness(b"not a video")
+
+        assert result["is_live"] is False
+        assert result["error"] == "invalid_video"
+        assert result["frames_analyzed"] == 0
+
+    def test_zero_frame_count_is_invalid(self):
+        """A video with no decodable frames/fps metadata is invalid."""
+        fake_cap = _FakeVideoCapture(fps=0.0, total_frames=0)
+
+        with patch("cv2.VideoCapture", return_value=fake_cap):
+            from app.core.liveness import analyze_video_liveness
+            result = analyze_video_liveness(b"fake video bytes")
+
+        assert result["is_live"] is False
+        assert result["error"] == "invalid_video"
+
+    def test_video_exception_returns_spoof(self):
+        """Any unexpected exception during analysis should fail closed."""
+        with patch("cv2.VideoCapture", side_effect=Exception("boom")):
+            from app.core.liveness import analyze_video_liveness
+            result = analyze_video_liveness(b"fake video bytes")
+
+        assert result["is_live"] is False
+        assert result["spoof_probability"] == 1.0
+        assert result["error"] == "invalid_video"
+

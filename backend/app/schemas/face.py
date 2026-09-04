@@ -41,6 +41,19 @@ class MatchResult(_BaseCamel):
     tenant_id: int = 1
 
 
+class LivenessResponse(_BaseCamel):
+    is_live: bool
+    spoof_probability: float
+    message: str
+
+
+class VideoLivenessResponse(_BaseCamel):
+    is_live: bool
+    spoof_probability: float
+    frames_analyzed: int
+    message: str
+
+
 class SearchResponse(_BaseCamel):
     status: str  # "MATCH" | "NO_MATCH" | "SPOOF_BLOCKED" | "ERROR"
     query_hash: str
