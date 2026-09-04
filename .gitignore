@@ -152,3 +152,8 @@ Thumbs.db
 testdata/
 fetch_wanted_criminals.py
 test_images/
+
+# cgraph index (machine-specific, regenerated)
+.cgraph/
+CLAUDE.md
+.mcp.json
