@@ -91,6 +91,80 @@ Authorization: Bearer <token>
 
 ---
 
+## Liveness Check
+
+```
+POST /api/v1/liveness
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
+```
+
+Standalone anti-spoofing check on a single camera frame — runs DeepFace's
+anti-spoofing model and reports real-vs-spoof, without running the
+detect → embed → match pipeline and without writing to the audit log. Use
+this for a pre-flight liveness check; use `POST /api/v1/search` with
+`is_live_capture=true` when you want liveness enforced as part of an actual
+search (which also logs `SPOOF_BLOCKED` to the audit trail).
+
+Intended for **live camera captures only** — static photo uploads will
+generally score as not-live.
+
+**Form Fields:**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `file` | File | Yes | Camera frame to verify (JPEG/PNG, ≤ 5 MB) |
+
+**Response:** `200 OK`
+```json
+{
+  "isLive": true,
+  "spoofProbability": 0.04,
+  "message": "Live face detected."
+}
+```
+
+**Errors:**
+- `400` — Invalid MIME type, file > 5 MB, or invalid/undersized image
+
+---
+
+## Video Liveness Check
+
+```
+POST /api/v1/liveness/video
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
+```
+
+Stronger, multi-frame variant of the liveness check: samples several frames
+spread across a short video clip and runs anti-spoofing on each. Harder to
+defeat than the single-frame check since an attack (printed photo, or a
+phone/monitor replaying a photo or video) has to fool anti-spoofing on
+every sampled frame, not just once. Read-only — no audit entry, no face
+match.
+
+**Form Fields:**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `file` | File | Yes | Short face video — MP4/WebM/QuickTime, **2.5-5.5s** duration (nominal 3-5s + tolerance for encoder rounding), ≤ 5 MB |
+
+**Response:** `200 OK`
+```json
+{
+  "isLive": true,
+  "spoofProbability": 0.08,
+  "framesAnalyzed": 6,
+  "message": "Live face detected across 6 sampled frames."
+}
+```
+
+**Errors:**
+- `400` — Invalid MIME type (must be MP4/WebM/QuickTime), file > 5 MB
+- `400` — Duration outside 2.5-5.5s
+- `400` — Video unreadable/corrupt or unsupported codec
+
+---
+
 ## List Alerts
 
 ```
