@@ -157,3 +157,5 @@ test_images/
 .cgraph/
 CLAUDE.md
 .mcp.json
+# Codex CLI local workspace
+.codex/

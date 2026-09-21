@@ -37,6 +37,14 @@ def mock_embedding():
     return emb / np.linalg.norm(emb)
 
 
+
+def _mock_present_versions(versions):
+    """Stub the tenant's enrolled-recipe census used by the search pipeline."""
+    return patch(
+        "app.db.vector_ops.get_present_embedding_versions",
+        AsyncMock(return_value=set(versions)),
+    )
+
 def make_test_image(color="red"):
     """Create a test image file for uploads."""
     img = Image.new("RGB", (112, 112), color=color)
@@ -202,6 +210,189 @@ class TestRegisterPipeline:
 class TestSearchPipeline:
     """Test the search pipeline stages."""
 
+    @pytest.mark.parametrize("present,expect_embedded,expect_queried", [
+        # Nothing enrolled under the current recipe yet — the state right after
+        # a version bump. Only the enrolled recipe is searched; the current one
+        # is still embedded, for the audit hash.
+        ({2},       [3, 2],    [2]),
+        ({1},       [3, 1],    [1]),
+        ({2, 1},    [3, 2, 1], [2, 1]),
+        # Part-way through re-enrolment.
+        ({3, 2},    [3, 2],    [3, 2]),
+        # Fully re-enrolled — one embedding, one query.
+        ({3},       [3],       [3]),
+        # Empty tenant: nothing to query, but still hashable.
+        (set(),     [3],       []),
+        # Unknown versions in the column are ignored, not embedded.
+        ({2, 99},   [3, 2],    [2]),
+    ])
+    async def test_search_embeds_only_enrolled_recipes_plus_current(
+        self, present, expect_embedded, expect_queried
+    ):
+        """Recipes with no enrolled rows are never embedded or queried."""
+        from app.core.pipeline import run_pipeline
+
+        embeddings = {v: np.full(512, v, dtype=np.float32) for v in (3, 2, 1)}
+
+        with _mock_present_versions(present), \
+             patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+             patch("app.core.pipeline.extract_embedding",
+                   side_effect=lambda face, version: embeddings[version]) as extract, \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])) as verify:
+            result = await run_pipeline(make_test_image(), AsyncMock(), tenant_id=7)
+
+        assert sorted(c.args[1] for c in extract.call_args_list) == sorted(expect_embedded)
+        assert sorted(c.kwargs["target_version"] for c in verify.await_args_list) == sorted(expect_queried)
+        assert result["status"] == "NO_MATCH"
+
+    async def test_search_ranks_across_recipes_rather_than_preferring_newest(self):
+        """A closer match in an older recipe must not be masked by a newer one."""
+        from app.core.pipeline import run_pipeline
+
+        # v3 holds a weak hit, v2 a much closer one.
+        hits = {
+            3: [{"id": 33, "face_name": "Weak v3", "distance": 0.51}],
+            2: [{"id": 22, "face_name": "Close v2", "distance": 0.12}],
+        }
+
+        async def verify(embedding, session, **kwargs):
+            return list(hits[kwargs["target_version"]])
+
+        with _mock_present_versions({3, 2}), \
+             patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+             patch("app.core.pipeline.extract_embedding",
+                   side_effect=lambda face, version: np.full(512, version, dtype=np.float32)), \
+             patch("app.core.pipeline.verify_match", side_effect=verify):
+            result = await run_pipeline(make_test_image(), AsyncMock(), limit=5)
+
+        assert result["status"] == "MATCH"
+        assert [m["id"] for m in result["matches"]] == [22, 33]
+        assert result["matches"][0]["face_name"] == "Close v2"
+
+    async def test_search_truncates_merged_results_to_limit(self):
+        """`limit` bounds the merged result set, not each recipe separately."""
+        from app.core.pipeline import run_pipeline
+
+        async def verify(embedding, session, **kwargs):
+            v = kwargs["target_version"]
+            return [{"id": v * 10 + i, "distance": 0.1 * v + i / 100} for i in range(3)]
+
+        with _mock_present_versions({3, 2}), \
+             patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+             patch("app.core.pipeline.extract_embedding",
+                   side_effect=lambda face, version: np.full(512, version, dtype=np.float32)), \
+             patch("app.core.pipeline.verify_match", side_effect=verify):
+            result = await run_pipeline(make_test_image(), AsyncMock(), limit=4)
+
+        distances = [m["distance"] for m in result["matches"]]
+        assert len(result["matches"]) == 4
+        assert distances == sorted(distances)
+        assert distances[0] == pytest.approx(0.2)   # v2's closest beats v3's
+
+    async def test_search_embeds_recipes_concurrently(self):
+        """The per-recipe embeddings run on the pool together, not serially."""
+        import threading
+        from app.core.pipeline import run_pipeline
+        from app.core.config import settings
+
+        assert settings.inference_pool_size >= 3, "pool must fit every recipe"
+        barrier = threading.Barrier(3, timeout=10)
+
+        def extract(face, version):
+            # Serial execution can never get three callers here at once, so a
+            # regression to a sequential loop fails with BrokenBarrierError.
+            barrier.wait()
+            return np.full(512, version, dtype=np.float32)
+
+        with _mock_present_versions({3, 2, 1}), \
+             patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+             patch("app.core.pipeline.extract_embedding", side_effect=extract), \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])):
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "NO_MATCH"
+        assert not barrier.broken
+
+    @pytest.mark.parametrize("present,matched", [
+        ({3, 2}, 3), ({3, 2}, 2), ({3, 2}, None), ({2}, 2), ({2}, None),
+    ])
+    async def test_audit_hash_identifies_the_query_not_the_matched_recipe(self, present, matched):
+        """The same image always audits under the same hash."""
+        from app.core.pipeline import run_pipeline
+        from app.db.vector_ops import compute_query_hash
+
+        embeddings = {v: np.full(512, v, dtype=np.float32) for v in (3, 2, 1)}
+
+        async def verify(embedding, session, **kwargs):
+            v = kwargs["target_version"]
+            return [{"id": v, "distance": 0.2}] if v == matched else []
+
+        with _mock_present_versions(present), \
+             patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+             patch("app.core.pipeline.extract_embedding",
+                   side_effect=lambda face, version: embeddings[version]), \
+             patch("app.core.pipeline.verify_match", side_effect=verify):
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == ("MATCH" if matched else "NO_MATCH")
+        assert result["query_hash"] == compute_query_hash(embeddings[3].tobytes())
+
+    async def test_failed_embedding_of_an_enrolled_recipe_is_an_error(self):
+        """Vectors that were never compared must not read as NO_MATCH."""
+        from app.core.pipeline import run_pipeline
+
+        def extract(face, version):
+            return None if version == 2 else np.full(512, version, dtype=np.float32)
+
+        with _mock_present_versions({3, 2}), \
+             patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+             patch("app.core.pipeline.extract_embedding", side_effect=extract), \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])) as verify:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "ERROR"
+        assert result["error"] == "Embedding extraction failed"
+        assert result["matches"] == []
+        assert result["query_hash"]
+        # v3 was still searched — only v2 was lost.
+        assert [c.kwargs["target_version"] for c in verify.await_args_list] == [3]
+
+    async def test_failed_embedding_of_an_unenrolled_current_recipe_still_matches(self):
+        """The hash-only recipe failing costs hash stability, not the search."""
+        from app.core.pipeline import run_pipeline
+        from app.db.vector_ops import compute_query_hash
+
+        v2 = np.full(512, 2, dtype=np.float32)
+
+        async def verify(embedding, session, **kwargs):
+            return [{"id": 22, "distance": 0.1}]
+
+        with _mock_present_versions({2}), \
+             patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+             patch("app.core.pipeline.extract_embedding",
+                   side_effect=lambda face, version: None if version == 3 else v2), \
+             patch("app.core.pipeline.verify_match", side_effect=verify):
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "MATCH"
+        assert result["matches"][0]["id"] == 22
+        # Falls back to the newest recipe that did embed.
+        assert result["query_hash"] == compute_query_hash(v2.tobytes())
+
+    async def test_liveness_rejection_never_queries_any_recipe(self):
+        from app.core.pipeline import run_pipeline
+
+        with patch("app.core.pipeline.check_liveness_on_bytes", return_value=False), \
+             patch("app.db.vector_ops.add_audit_entry", AsyncMock(return_value=1)), \
+             patch("app.db.vector_ops.get_present_embedding_versions") as census, \
+             patch("app.core.pipeline.extract_embedding") as extract, \
+             patch("app.core.pipeline.verify_match") as verify:
+            result = await run_pipeline(make_test_image(), AsyncMock(), enforce_liveness=True)
+        assert result["status"] == "SPOOF_BLOCKED"
+        census.assert_not_called()
+        extract.assert_not_called()
+        verify.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_search_no_match(self, mock_embedding):
         """Pipeline runs, ANN returns empty — status NO_MATCH."""
@@ -209,7 +400,8 @@ class TestSearchPipeline:
         mock_extract = MagicMock(return_value=mock_embedding)
         mock_verify = AsyncMock(return_value=[])
 
-        with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
+        with _mock_present_versions({3, 2, 1}), \
+             patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
              patch("app.core.pipeline.detect_face", mock_detect), \
              patch("app.core.pipeline.extract_embedding", mock_extract), \
              patch("app.core.pipeline.verify_match", mock_verify):
@@ -226,7 +418,8 @@ class TestSearchPipeline:
             assert result["status"] == "NO_MATCH"
             assert result["matches"] == []
             assert result["query_hash"] is not None
-            assert mock_verify.call_count == 2
+            # One query per enrolled recipe.
+            assert mock_verify.call_count == 3
 
     @pytest.mark.asyncio
     async def test_search_match(self, mock_embedding):
@@ -237,7 +430,8 @@ class TestSearchPipeline:
             {"id": 1, "face_name": "John Doe", "alias": "JD", "distance": 0.32, "query_hash": "abc"},
         ])
 
-        with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
+        with _mock_present_versions({3}), \
+             patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
              patch("app.core.pipeline.detect_face", mock_detect), \
              patch("app.core.pipeline.extract_embedding", mock_extract), \
              patch("app.core.pipeline.verify_match", mock_verify):
@@ -250,7 +444,7 @@ class TestSearchPipeline:
             result = await run_pipeline(file, AsyncMock())
 
             assert result["status"] == "MATCH"
-            assert len(result["matches"]) == 2
+            assert len(result["matches"]) == 1
             assert result["matches"][0]["face_name"] == "John Doe"
             assert result["matches"][0]["distance"] == 0.32
 
@@ -279,7 +473,10 @@ class TestSearchPipeline:
         mock_detect = MagicMock(return_value=np.zeros((112, 112, 3), dtype=np.uint8))
         mock_extract = MagicMock(return_value=None)
 
-        with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
+        # The current recipe holds enrolled rows, so failing to embed it means
+        # those vectors were never compared: ERROR, not NO_MATCH.
+        with _mock_present_versions({3}), \
+             patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
              patch("app.core.pipeline.detect_face", mock_detect), \
              patch("app.core.pipeline.extract_embedding", mock_extract):
 
@@ -388,7 +585,8 @@ class TestSearchPipeline:
             {"id": 1, "face_name": "Match", "alias": None, "distance": 0.25},
         ])
 
-        with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
+        with _mock_present_versions({3}), \
+             patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
              patch("app.core.pipeline.detect_face", mock_detect), \
              patch("app.core.pipeline.extract_embedding", mock_extract), \
              patch("app.db.vector_ops.cosine_ann_query", mock_ann):
@@ -413,7 +611,8 @@ class TestSearchPipeline:
             {"id": 1, "face_name": "Close Match", "alias": None, "distance": 0.32},
         ])
 
-        with patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
+        with _mock_present_versions({3}), \
+             patch("app.core.pipeline.check_liveness_on_bytes", _mock_liveness_true()), \
              patch("app.core.pipeline.detect_face", mock_detect), \
              patch("app.core.pipeline.extract_embedding", mock_extract), \
              patch("app.core.pipeline.verify_match", mock_verify):
@@ -826,7 +1025,7 @@ class TestPreprocessing:
         import cv2
 
         # Create a face with exactly mean=128
-        mid_face = np.full((200, 160, 3), 128, dtype=np.uint8)
+        mid_face = np.full((112, 112, 3), 128, dtype=np.uint8)
 
         with patch("app.core.pipeline.settings") as mock_settings:
             mock_settings.enable_upscale_small_crops = False
@@ -840,8 +1039,8 @@ class TestPreprocessing:
 
         result_gray = cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)
         result_mean = float(np.mean(result_gray))
-        # Should remain close to 128 (within ±20 accounting for pad pixels)
-        assert abs(result_mean - 128) < 25, (
+        # Isolate gamma from padding: mid-tone pixels should remain mid-tone.
+        assert abs(result_mean - 128) <= 1, (
             f"Mid-tone image should not be significantly altered: mean={result_mean:.1f}"
         )
 
@@ -909,3 +1108,90 @@ class TestPreprocessing:
         assert settings.enable_gamma_correction is True
         assert settings.enable_unsharp_mask is True
         assert settings.unsharp_strength == 1.5
+
+
+class TestPreprocessingRegression:
+    @pytest.fixture(autouse=True)
+    def disable_enhancements(self):
+        from app.core.config import settings
+
+        with patch.multiple(
+            settings, enable_upscale_small_crops=False, enable_denoising=False,
+            enable_gamma_correction=False, enable_clahe=False, enable_unsharp_mask=False,
+        ):
+            yield
+
+    @pytest.mark.parametrize("h,w", [(112, 72), (72, 112), (112, 73), (73, 112), (112, 112)])
+    @pytest.mark.parametrize("normalized", [False, True])
+    def test_rectangular_crop_is_centered_without_stretching(self, h, w, normalized):
+        from app.core.pipeline import _preprocess_for_arcface
+
+        face = np.full((h, w, 3), [255, 0, 0], dtype=np.uint8)
+        if normalized:
+            face = face.astype(np.float32) / 255
+        result = _preprocess_for_arcface(face)
+        expected = np.zeros((112, 112, 3), dtype=np.uint8)
+        y, x = (112 - h) // 2, (112 - w) // 2
+        expected[y:y + h, x:x + w] = [255, 0, 0]
+        np.testing.assert_array_equal(result, expected)
+
+    @pytest.mark.parametrize("h,w", [(227, 167), (167, 227)])
+    def test_resize_receives_square_crop(self, h, w):
+        import cv2
+        from app.core.pipeline import _preprocess_for_arcface
+
+        with patch("cv2.resize", wraps=cv2.resize) as resize:
+            _preprocess_for_arcface(np.full((h, w, 3), 100, dtype=np.uint8))
+        assert resize.call_args.args[0].shape == (227, 227, 3)
+
+    @pytest.mark.parametrize("value", [0, 1, 254, 255])
+    @pytest.mark.parametrize("version", [2, 3])
+    def test_gamma_handles_extreme_exposures(self, value, version):
+        from app.core.pipeline import _preprocess_for_arcface
+        from app.core.config import settings
+
+        face = np.full((112, 112, 3), value, dtype=np.uint8)
+        with patch.object(settings, "enable_gamma_correction", True):
+            result = _preprocess_for_arcface(face, version=version)
+        assert result.dtype == np.uint8
+        assert result.shape == face.shape
+        assert np.isfinite(result).all()
+        if value in (0, 1, 255):
+            np.testing.assert_array_equal(result, face)
+
+    @pytest.mark.parametrize("version", [1, 2, 3, None])
+    def test_embedding_handoff_preserves_versioned_color_contract(self, version):
+        import sys
+        from types import SimpleNamespace
+        from app.core.pipeline import extract_embedding
+
+        rgb = np.full((112, 112, 3), [240, 100, 20], dtype=np.uint8)
+        deepface = MagicMock()
+        deepface.represent.return_value = [{"embedding": np.ones(512).tolist()}]
+        with patch.dict(sys.modules, {"deepface": SimpleNamespace(DeepFace=deepface)}):
+            embedding = extract_embedding(rgb) if version is None else extract_embedding(rgb, version=version)
+        passed = deepface.represent.call_args.kwargs
+        expected = rgb[:, :, ::-1] if version in (3, None) else rgb
+        np.testing.assert_array_equal(passed["img_path"], expected)
+        assert passed["img_path"].flags.c_contiguous
+        assert passed["detector_backend"] == "skip"
+        assert embedding.shape == (512,)
+        assert np.linalg.norm(embedding) == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("version", [1, 2])
+    def test_legacy_geometry_is_preserved(self, version):
+        import cv2
+        from app.core.pipeline import _preprocess_for_arcface
+
+        face = np.full((112, 72, 3), [240, 100, 20], dtype=np.uint8)
+        # Historical recipe added 20 columns only on the left, then stretched.
+        legacy = np.zeros((112, 92, 3), dtype=np.uint8)
+        legacy[:, 20:] = face
+        expected = cv2.resize(legacy, (112, 112), interpolation=cv2.INTER_LANCZOS4)
+        np.testing.assert_array_equal(_preprocess_for_arcface(face, version=version), expected)
+
+    def test_unknown_recipe_is_rejected(self):
+        from app.core.pipeline import _preprocess_for_arcface
+
+        with pytest.raises(ValueError, match="Unsupported embedding version"):
+            _preprocess_for_arcface(np.zeros((112, 112, 3), dtype=np.uint8), version=99)

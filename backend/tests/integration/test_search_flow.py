@@ -9,7 +9,9 @@ Tests:
 """
 
 import io
+from unittest.mock import AsyncMock, patch
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -17,6 +19,7 @@ from PIL import Image
 from app.core.auth import create_access_token
 
 from app.main import app
+from app.db.session import get_session
 
 
 @pytest.fixture
@@ -32,6 +35,140 @@ def auth_token():
 @pytest.fixture
 def auth_headers(auth_token):
     return {"Authorization": f"Bearer {auth_token}"}
+
+
+@pytest.mark.parametrize("enrolled,closest_version", [
+    # Right after the version bump: everything still on the previous recipe.
+    ({2}, 2),
+    ({2, 1}, 1),
+    # Part-way through re-enrolment — the older recipe holds the better match
+    # and must still win.
+    ({3, 2}, 2),
+    ({3, 2, 1}, 1),
+    # Fully re-enrolled.
+    ({3}, 3),
+    # Nothing matches anywhere.
+    ({3, 2}, None),
+])
+def test_search_across_enrolled_recipes(client, auth_headers, enrolled, closest_version):
+    """HTTP -> pipeline -> real ANN SQL -> merged ranking -> audit event."""
+    from app.core.config import settings, CURRENT_EMBEDDING_VERSION
+    from app.db.vector_ops import compute_query_hash
+
+    session = AsyncMock()
+    embeddings = {v: np.full(512, v, dtype=np.float32) for v in (3, 2, 1)}
+    queried_versions = []
+
+    async def override_session():
+        yield session
+
+    async def execute(sql, params):
+        statement = str(sql)
+
+        # 1) The enrolled-recipe census that gates which recipes get embedded.
+        if "SELECT DISTINCT embedding_version" in statement:
+            assert params == {"tenant_id": 7}
+            return [(v,) for v in sorted(enrolled)]
+
+        # 2) The real cosine_ann_query SQL — assert its bound parameters rather
+        #    than mocking the pipeline out from under them.
+        assert "WHERE (face_embedding <=> :vec) <= :threshold" in statement
+        assert "AND tenant_id = :tenant_id" in statement
+        assert "AND embedding_version = :target_version" in statement
+        assert params["threshold"] == settings.match_threshold
+        assert params["tenant_id"] == 7
+        assert params["limit"] == 5
+        version = params["target_version"]
+        assert params["vec"] == "[" + ",".join([f"{version:.10f}"] * 512) + "]"
+        queried_versions.append(version)
+
+        if closest_version is None:
+            return []
+        # Every enrolled recipe returns a hit; the designated one is closest.
+        distance = 0.10 if version == closest_version else 0.40
+        return [(version, f"Face v{version}", None, distance, version)]
+
+    session.execute.side_effect = execute
+    image = io.BytesIO()
+    Image.new("RGB", (112, 112), color="blue").save(image, format="PNG")
+    with patch.dict(app.dependency_overrides, {get_session: override_session}), \
+         patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+         patch("app.core.pipeline.extract_embedding",
+               side_effect=lambda face, version: embeddings[version]) as extract, \
+         patch("app.api.routes.search.add_audit_entry", AsyncMock(return_value=42)) as audit, \
+         patch("app.api.routes.search.create_alert", AsyncMock(return_value=43)) as alert:
+        response = client.post(
+            "/api/v1/search", headers=auth_headers, params={"limit": 5},
+            data={"tenant_id": 7}, files={"file": ("test.png", image.getvalue(), "image/png")},
+        )
+
+    assert response.status_code == 200
+    result = response.json()
+
+    # Only enrolled recipes are queried; the current one is always embedded so
+    # the audit hash does not depend on which recipe held the match.
+    assert sorted(queried_versions) == sorted(enrolled)
+    assert sorted(c.args[1] for c in extract.call_args_list) == sorted(
+        enrolled | {CURRENT_EMBEDDING_VERSION}
+    )
+
+    expected_status = "MATCH" if closest_version else "NO_MATCH"
+    expected_hash = compute_query_hash(embeddings[CURRENT_EMBEDDING_VERSION].tobytes())
+    assert result["status"] == expected_status
+    assert result["queryHash"] == expected_hash
+    audit.assert_awaited_once()
+    assert audit.call_args.kwargs["event_type"] == expected_status
+    assert audit.call_args.kwargs["query_hash"] == expected_hash
+
+    if closest_version:
+        # Merged across recipes and ranked by distance, closest first.
+        distances = [m["distance"] for m in result["matches"]]
+        assert len(result["matches"]) == len(enrolled)
+        assert distances == sorted(distances)
+        assert result["matches"][0]["embeddingVersion"] == closest_version
+        assert result["matches"][0]["distance"] == 0.10
+        alert.assert_awaited_once()
+        assert alert.call_args.kwargs["distance"] == 0.10
+    else:
+        assert result["matches"] == []
+        alert.assert_not_awaited()
+
+
+def test_search_result_limit_bounds_the_merged_set(client, auth_headers):
+    """`limit` caps results across all recipes combined, not per recipe."""
+    session = AsyncMock()
+
+    async def override_session():
+        yield session
+
+    async def execute(sql, params):
+        statement = str(sql)
+        if "SELECT DISTINCT embedding_version" in statement:
+            return [(3,), (2,)]
+        v = params["target_version"]
+        # Each recipe returns `limit` rows; interleaved distances across them.
+        return [(v * 10 + i, f"v{v}#{i}", None, 0.05 * (2 * i + (v == 3)), v)
+                for i in range(params["limit"])]
+
+    session.execute.side_effect = execute
+    image = io.BytesIO()
+    Image.new("RGB", (112, 112), color="blue").save(image, format="PNG")
+    with patch.dict(app.dependency_overrides, {get_session: override_session}), \
+         patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))), \
+         patch("app.core.pipeline.extract_embedding",
+               side_effect=lambda face, version: np.full(512, version, dtype=np.float32)), \
+         patch("app.api.routes.search.add_audit_entry", AsyncMock(return_value=1)), \
+         patch("app.api.routes.search.create_alert", AsyncMock(return_value=2)):
+        response = client.post(
+            "/api/v1/search", headers=auth_headers, params={"limit": 3},
+            files={"file": ("test.png", image.getvalue(), "image/png")},
+        )
+
+    assert response.status_code == 200
+    matches = response.json()["matches"]
+    distances = [m["distance"] for m in matches]
+    assert len(matches) == 3, "6 candidate rows must be truncated to the limit"
+    assert distances == sorted(distances)
 
 
 class TestSearchFlow:
