@@ -9,7 +9,7 @@ from typing import Optional
 import numpy as np
 from sqlalchemy import text
 
-from app.core.config import settings
+from app.core.config import CURRENT_EMBEDDING_VERSION, settings
 from app.core.crypto import decrypt_embedding_bytes, encrypt_embedding_vector
 
 
@@ -93,6 +93,30 @@ async def cosine_ann_query(
     return rows
 
 
+async def get_present_embedding_versions(session, tenant_id: int = 1) -> set[int]:
+    """
+    Return the set of ``embedding_version`` values that actually have rows for
+    this tenant.
+
+    Search embeds the query once per recipe, which is the expensive part of a
+    lookup. Recipes with no enrolled rows can never produce a match, so this
+    lets the pipeline skip embedding them entirely — the common case after a
+    version bump, when every profile still carries the previous recipe.
+
+    Backed by the ``face_profiles_tenant_version_idx`` index, so this is an
+    index-only scan rather than a table scan.
+    """
+    sql = text(
+        """
+        SELECT DISTINCT embedding_version
+        FROM face_profiles
+        WHERE tenant_id = :tenant_id
+        """
+    )
+    result = await session.execute(sql, {"tenant_id": tenant_id})
+    return {int(row[0]) for row in result if row[0] is not None}
+
+
 async def register_profile(
     session,
     person_name: str,
@@ -112,7 +136,7 @@ async def register_profile(
     sql = text(
         """
         INSERT INTO face_profiles (face_name, alias, demographics, face_embedding, face_embedding_enc, tenant_id, embedding_version)
-        VALUES (:face_name, :alias, :demographics, CAST(:vec AS vector), :enc, :tenant_id, 2)
+        VALUES (:face_name, :alias, :demographics, CAST(:vec AS vector), :enc, :tenant_id, :embedding_version)
         RETURNING id
         """
     )
@@ -123,6 +147,7 @@ async def register_profile(
             "face_name": person_name,
             "alias": alias,
             "demographics": demographics,
+            "embedding_version": CURRENT_EMBEDDING_VERSION,
             "vec": vec_str,
             "enc": encrypted,
             "tenant_id": tenant_id,
@@ -159,7 +184,7 @@ async def update_face_embedding(
         UPDATE face_profiles
         SET face_embedding     = CAST(:vec AS vector),
             face_embedding_enc = :enc,
-            embedding_version  = 2
+            embedding_version  = :embedding_version
         WHERE id = :face_id AND tenant_id = :tenant_id
         RETURNING id
         """
@@ -169,6 +194,7 @@ async def update_face_embedding(
         sql,
         {
             "face_id": face_id,
+            "embedding_version": CURRENT_EMBEDDING_VERSION,
             "vec": vec_str,
             "enc": encrypted,
             "tenant_id": tenant_id,

@@ -304,6 +304,7 @@ class TestRegisterAndAudit:
         params = call_args[0][1] if call_args[0] else call_args[1]
         assert "vec" in params
         assert "enc" in params
+        assert params["embedding_version"] == 3
 
     @pytest.mark.asyncio
     async def test_audit_entry_insert_only(self):
@@ -357,4 +358,76 @@ class TestRegisterAndAudit:
         assert entry.gps_lon == -74.0
 
 
+@pytest.mark.parametrize("exists", [True, False])
+async def test_reenrollment_persists_current_embedding_version(exists):
+    from app.db.vector_ops import update_face_embedding
 
+    session = AsyncMock()
+    result = MagicMock()
+    result.fetchone.return_value = (9,) if exists else None
+    session.execute.return_value = result
+    assert await update_face_embedding(session, 9, np.ones(512), tenant_id=7) is exists
+    sql, params = session.execute.call_args.args
+    assert "embedding_version  = :embedding_version" in str(sql)
+    assert params["embedding_version"] == 3
+    assert params["face_id"] == 9
+    assert params["tenant_id"] == 7
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("rows,expected", [
+    ([(2,)], {2}),
+    ([(3,), (2,), (1,)], {3, 2, 1}),
+    ([], set()),
+    # Duplicates and unexpected values come back as-is; the pipeline decides
+    # which of them it can actually embed.
+    ([(2,), (2,), (99,)], {2, 99}),
+])
+async def test_present_embedding_versions_census(rows, expected):
+    from app.db.vector_ops import get_present_embedding_versions
+
+    session = AsyncMock()
+    session.execute.return_value = rows
+    assert await get_present_embedding_versions(session, tenant_id=7) == expected
+
+    sql, params = session.execute.call_args.args
+    statement = str(sql)
+    assert "SELECT DISTINCT embedding_version" in statement
+    assert "WHERE tenant_id = :tenant_id" in statement
+    assert params == {"tenant_id": 7}
+    # A census must never mutate anything.
+    session.commit.assert_not_awaited()
+
+
+async def test_present_embedding_versions_defaults_to_tenant_one():
+    from app.db.vector_ops import get_present_embedding_versions
+
+    session = AsyncMock()
+    session.execute.return_value = []
+    await get_present_embedding_versions(session)
+    assert session.execute.call_args.args[1] == {"tenant_id": 1}
+
+
+def test_current_embedding_version_is_the_newest_supported_recipe():
+    """Bumping one constant without the other must not silently drop a recipe."""
+    from app.core.config import CURRENT_EMBEDDING_VERSION, SUPPORTED_EMBEDDING_VERSIONS
+
+    assert CURRENT_EMBEDDING_VERSION == max(SUPPORTED_EMBEDDING_VERSIONS)
+    # Newest first, no duplicates — search relies on this ordering.
+    assert list(SUPPORTED_EMBEDDING_VERSIONS) == sorted(set(SUPPORTED_EMBEDDING_VERSIONS), reverse=True)
+
+
+def test_every_supported_recipe_is_reproducible():
+    """Each listed recipe must have a working branch in the preprocessor."""
+    import numpy as np
+    from app.core.config import SUPPORTED_EMBEDDING_VERSIONS
+    from app.core.pipeline import _preprocess_for_arcface
+
+    face = np.full((160, 120, 3), 90, dtype=np.uint8)
+    for version in SUPPORTED_EMBEDDING_VERSIONS:
+        out = _preprocess_for_arcface(face.copy(), version=version)
+        assert out.shape == (112, 112, 3)
+        assert out.dtype == np.uint8
+
+    with pytest.raises(ValueError, match="Unsupported embedding version"):
+        _preprocess_for_arcface(face.copy(), version=max(SUPPORTED_EMBEDDING_VERSIONS) + 1)

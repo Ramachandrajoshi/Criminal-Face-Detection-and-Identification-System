@@ -30,7 +30,11 @@ from typing import Optional
 import numpy as np
 from fastapi import UploadFile
 
-from app.core.config import settings
+from app.core.config import (
+    CURRENT_EMBEDDING_VERSION,
+    SUPPORTED_EMBEDDING_VERSIONS,
+    settings,
+)
 from app.core.inference_executor import get_executor
 from app.db.vector_ops import compute_query_hash
 
@@ -132,9 +136,14 @@ def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
 
 # ---------- Stage 2-3: ALIGN + NORMALIZE ----------
 
-def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
+def _preprocess_for_arcface(
+    face: np.ndarray, version: int = CURRENT_EMBEDDING_VERSION
+) -> np.ndarray:
     """
     Prepare an aligned face array for ArcFace embedding extraction.
+
+    Returns RGB uint8. Version 3 fixes square padding; older recipes retain
+    their geometry for compatibility with already-enrolled embeddings.
 
     Input contract
     --------------
@@ -177,6 +186,12 @@ def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
     import cv2
     import math
 
+    if version not in SUPPORTED_EMBEDDING_VERSIONS:
+        raise ValueError(
+            f"Unsupported embedding version: {version} "
+            f"(supported: {SUPPORTED_EMBEDDING_VERSIONS})"
+        )
+
     # ── Step 0: uint8 conversion ─────────────────────────────────────────────
     if face.dtype != np.uint8:
         face = (face * 255.0).clip(0, 255).astype(np.uint8)
@@ -189,7 +204,7 @@ def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
     # CCTV face crops can be as small as 50×50 px. Upscaling to at least
     # `small_crop_min_side` before enhancement gives the subsequent filters
     # significantly more pixels to work with and reduces blocking artefacts.
-    if version == 2 and settings.enable_upscale_small_crops:
+    if version >= 2 and settings.enable_upscale_small_crops:
         h, w = face_bgr.shape[:2]
         min_side = min(h, w)
         if min_side < settings.small_crop_min_side:
@@ -208,7 +223,7 @@ def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
     # Non-local means denoising removes CCTV sensor/compression noise before
     # the contrast equaliser runs. h=5 is conservative — strong enough to
     # smooth noise without blurring eye or lip edges.
-    if version == 2 and settings.enable_denoising:
+    if version >= 2 and settings.enable_denoising:
         face_bgr = cv2.fastNlMeansDenoisingColored(
             face_bgr,
             None,
@@ -228,10 +243,10 @@ def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
     #   • Dark image  (μ ≈ 40):  γ ≈ 0.32  → x^0.32  lifts shadows  ✓
     #   • Mid image   (μ ≈ 128): γ ≈ 1.0   → x^1.0   identity       ✓
     #   • Bright image(μ ≈ 220): γ ≈ 4.5   → x^4.5   compresses highlights ✓
-    if version == 2 and settings.enable_gamma_correction:
+    if version >= 2 and settings.enable_gamma_correction:
         gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
         mean_lum = float(np.mean(gray))
-        if mean_lum > 1.0:  # guard against pure-black frames
+        if 1.0 < mean_lum < 255.0:  # avoid log(0) and division by log(1)
             gamma = math.log(0.5) / math.log(mean_lum / 255.0)
             gamma = float(np.clip(gamma, 0.1, 5.0))  # prevent extreme correction
             # Apply x^gamma: for dark images (gamma<1) this lifts shadows.
@@ -260,7 +275,7 @@ def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
         face_bgr = cv2.cvtColor(face_lab, cv2.COLOR_LAB2BGR)
 
     # ── Step 5: Unsharp mask ─────────────────────────────────────────────────
-    if version == 2 and settings.enable_unsharp_mask:
+    if version >= 2 and settings.enable_unsharp_mask:
         blurred = cv2.GaussianBlur(face_bgr, (0, 0), sigmaX=2.0)
         s = float(settings.unsharp_strength)
         face_bgr = cv2.addWeighted(face_bgr, s, blurred, -(s - 1.0), 0)
@@ -270,8 +285,15 @@ def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
     if face.shape[:2] != (112, 112):
         h, w = face.shape[:2]
         side = max(h, w)
-        top, bottom = divmod(side - h, 2)
-        left, right = divmod(side - w, 2)
+        if version >= 3:
+            top = (side - h) // 2
+            bottom = side - h - top
+            left = (side - w) // 2
+            right = side - w - left
+        else:
+            # Preserve legacy geometry for queries against existing vectors.
+            top, bottom = divmod(side - h, 2)
+            left, right = divmod(side - w, 2)
         face = cv2.copyMakeBorder(
             face, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0
         )
@@ -281,7 +303,9 @@ def _preprocess_for_arcface(face: np.ndarray, version: int = 2) -> np.ndarray:
 
 
 # ---------- Stage 4: REPRESENT ----------
-def extract_embedding(aligned_face: np.ndarray, version: int = 2) -> Optional[np.ndarray]:
+def extract_embedding(
+    aligned_face: np.ndarray, version: int = CURRENT_EMBEDDING_VERSION
+) -> Optional[np.ndarray]:
     """
     Extract a 512-d ArcFace embedding from an aligned face image.
     Returns L2-normalised numpy array or None on failure.
@@ -300,6 +324,10 @@ def extract_embedding(aligned_face: np.ndarray, version: int = 2) -> Optional[np
         from deepface import DeepFace
 
         processed_face = _preprocess_for_arcface(aligned_face, version=version)
+        if version >= 3:
+            # extract_faces returns RGB; represent's ndarray API expects BGR,
+            # including detector_backend="skip". Legacy vectors used RGB here.
+            processed_face = np.ascontiguousarray(processed_face[:, :, ::-1])
 
         result = DeepFace.represent(
             img_path=processed_face,
@@ -406,6 +434,23 @@ async def run_pipeline(
     """
     Execute the full five-stage detection pipeline on an uploaded image.
 
+    Embedding recipes
+    -----------------
+    A stored vector can only be compared against a query embedded with the
+    same recipe, so the query is embedded once per recipe that actually has
+    rows for this tenant (see ``get_present_embedding_versions``) — after a
+    version bump that is typically a single recipe, not all of them. Those
+    embeddings are independent and run concurrently on the inference pool.
+
+    Every recipe's hits are then merged and ranked by distance together, so a
+    closer match under an older recipe is never masked by a weaker one under a
+    newer recipe. ``limit`` bounds the merged set.
+
+    The current recipe is always embedded, even when nothing is enrolled under
+    it yet, so ``query_hash`` identifies the query image rather than whichever
+    recipe happened to hold the match — audit entries for the same image stay
+    comparable across a re-enrolment.
+
     Parameters
     ----------
     enforce_liveness:
@@ -444,28 +489,65 @@ async def run_pipeline(
         return {"status": "ERROR", "error": "No face detected", "matches": []}
 
     # ── Stage 4: Represent ────────────────────────────────────────
-    # Extract dual embeddings for seamless migration — independent, so run
-    # them concurrently on the inference pool rather than sequentially.
-    embedding_v2, embedding_v1 = await asyncio.gather(
-        loop.run_in_executor(executor, extract_embedding, aligned, 2),
-        loop.run_in_executor(executor, extract_embedding, aligned, 1),
+    # A stored vector is only comparable to a query embedded with the same
+    # recipe, so the query is embedded once per recipe still in use. Recipes
+    # with no enrolled rows for this tenant can never match, so they are not
+    # embedded at all — after a version bump that is every recipe but one.
+    from app.db.vector_ops import get_present_embedding_versions
+
+    present = await get_present_embedding_versions(session, tenant_id=tenant_id)
+    searchable = [v for v in SUPPORTED_EMBEDDING_VERSIONS if v in present]
+
+    # The current recipe is always embedded, even with nothing enrolled under
+    # it yet: it is what gives the audit trail a hash that depends only on the
+    # query image, not on which recipe happened to hold the match.
+    to_embed = sorted({*searchable, CURRENT_EMBEDDING_VERSION}, reverse=True)
+
+    # Independent work — run it on the inference pool concurrently rather than
+    # serially, so wall-clock stays at roughly one embedding.
+    embeddings = dict(
+        zip(
+            to_embed,
+            await asyncio.gather(
+                *(
+                    loop.run_in_executor(executor, extract_embedding, aligned, v)
+                    for v in to_embed
+                )
+            ),
+        )
     )
 
-    if embedding_v2 is None or embedding_v1 is None:
-        return {"status": "ERROR", "error": "Embedding extraction failed", "matches": []}
-
-    # We use v2 hash for the primary audit trail
-    query_hash = compute_query_hash(embedding_v2.tobytes())
+    # Prefer the current recipe's hash; fall back to the newest that succeeded
+    # so a failed extraction still leaves a usable audit trail.
+    query_hash = next(
+        (
+            compute_query_hash(embeddings[v].tobytes())
+            for v in (CURRENT_EMBEDDING_VERSION, *to_embed)
+            if embeddings.get(v) is not None
+        ),
+        compute_query_hash(b""),
+    )
 
     # ── Stage 5: Verify ───────────────────────────────────────────
-    matches_v2, matches_v1 = await asyncio.gather(
-        verify_match(embedding_v2, session, limit=limit, tenant_id=tenant_id, target_version=2),
-        verify_match(embedding_v1, session, limit=limit, tenant_id=tenant_id, target_version=1),
+    # Each recipe is queried against its own vectors, then the results are
+    # merged and ranked by distance. Ranking globally rather than returning
+    # the newest recipe's hits means a closer match in an older recipe is
+    # never masked by a weaker one in a newer recipe.
+    searched = [v for v in searchable if embeddings[v] is not None]
+    per_version = await asyncio.gather(
+        *(
+            verify_match(
+                embeddings[v], session, threshold=settings.match_threshold,
+                limit=limit, tenant_id=tenant_id, target_version=v,
+            )
+            for v in searched
+        )
     )
 
-    all_matches = matches_v2 + matches_v1
-    all_matches.sort(key=lambda m: m["distance"])
-    matches = all_matches[:limit]
+    matches = sorted(
+        (m for group in per_version for m in group),
+        key=lambda m: m["distance"],
+    )[:limit]
 
     if matches:
         return {
@@ -476,6 +558,17 @@ async def run_pipeline(
             "gps_lon": gps_lon,
             "tenant_id": tenant_id,
         }
+
+    if len(searched) != len(searchable):
+        # A recipe holding enrolled vectors could not be embedded, so those
+        # vectors were never compared — that is not a complete NO_MATCH.
+        # A failure of the current recipe while nothing is enrolled under it
+        # costs only hash stability and does not reach here.
+        return {
+            "status": "ERROR", "error": "Embedding extraction failed", "matches": [],
+            "query_hash": query_hash,
+        }
+
     return {
         "status": "NO_MATCH",
         "matches": [],

@@ -8,6 +8,26 @@ from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Every preprocessing recipe that ``_preprocess_for_arcface`` can still
+# reproduce, newest first. Stored vectors are only ever compared against a
+# query embedded with their own recipe, so a recipe stays listed here for as
+# long as any row still carries that ``embedding_version``.
+#
+# Adding a recipe means: add a branch in ``_preprocess_for_arcface``, prepend
+# the number here, and point CURRENT_EMBEDDING_VERSION at it. The assertion
+# below makes bumping one without the other fail at import rather than
+# silently dropping the previous recipe out of search.
+SUPPORTED_EMBEDDING_VERSIONS = (3, 2, 1)
+
+# Recipe used for new enrollments and re-enrollments; existing vectors keep
+# the recipe they were enrolled with until they are re-enrolled.
+CURRENT_EMBEDDING_VERSION = 3
+
+assert CURRENT_EMBEDDING_VERSION == max(SUPPORTED_EMBEDDING_VERSIONS), (
+    f"CURRENT_EMBEDDING_VERSION ({CURRENT_EMBEDDING_VERSION}) must be the newest "
+    f"entry in SUPPORTED_EMBEDDING_VERSIONS {SUPPORTED_EMBEDDING_VERSIONS}"
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
