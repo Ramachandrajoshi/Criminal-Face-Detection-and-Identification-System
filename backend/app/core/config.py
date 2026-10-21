@@ -8,25 +8,21 @@ from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Every preprocessing recipe that ``_preprocess_for_arcface`` can still
-# reproduce, newest first. Stored vectors are only ever compared against a
-# query embedded with their own recipe, so a recipe stays listed here for as
-# long as any row still carries that ``embedding_version``.
+# Every embedding recipe the pipeline can still reproduce, newest first.
+# Stored vectors are only ever compared against a query embedded with their
+# own recipe, so a recipe stays listed here for as long as any row still
+# carries that ``embedding_version``.
 #
-# Adding a recipe means: add a branch in ``_preprocess_for_arcface``, prepend
-# the number here, and point CURRENT_EMBEDDING_VERSION at it. The assertion
-# below makes bumping one without the other fail at import rather than
-# silently dropping the previous recipe out of search.
-SUPPORTED_EMBEDDING_VERSIONS = (3, 2, 1)
+#   1–3 — DeepFace ArcFace + the ``_preprocess_for_arcface`` recipes
+#   4   — InsightFace buffalo_l on ONNX Runtime (app/core/face_engine.py)
+#
+# Adding a DeepFace recipe means: add a branch in ``_preprocess_for_arcface``
+# and list it in both tuples below.
+SUPPORTED_EMBEDDING_VERSIONS = (4, 3, 2, 1)
+DEEPFACE_EMBEDDING_VERSIONS = (3, 2, 1)
+INSIGHTFACE_EMBEDDING_VERSION = 4
 
-# Recipe used for new enrollments and re-enrollments; existing vectors keep
-# the recipe they were enrolled with until they are re-enrolled.
-CURRENT_EMBEDDING_VERSION = 3
-
-assert CURRENT_EMBEDDING_VERSION == max(SUPPORTED_EMBEDDING_VERSIONS), (
-    f"CURRENT_EMBEDDING_VERSION ({CURRENT_EMBEDDING_VERSION}) must be the newest "
-    f"entry in SUPPORTED_EMBEDDING_VERSIONS {SUPPORTED_EMBEDDING_VERSIONS}"
-)
+assert set(SUPPORTED_EMBEDDING_VERSIONS) == {*DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION}
 
 
 class Settings(BaseSettings):
@@ -39,6 +35,30 @@ class Settings(BaseSettings):
     deepface_model: str = "ArcFace"
     deepface_detector: str = "retinaface"
     match_threshold: float = 0.58
+
+    # Recipe used for new enrollments and re-enrollments (EMBEDDING_VERSION).
+    # Existing vectors keep the recipe they were enrolled with until they are
+    # re-enrolled, and search keeps matching them under that recipe — so
+    # switching this never invalidates already-registered faces.
+    #   3 — DeepFace ArcFace (default)
+    #   4 — InsightFace buffalo_l (research licence; see face_engine.py)
+    embedding_version: int = 3
+
+    # --- InsightFace (embedding version 4) ---
+    # Cosine-distance match threshold for version-4 vectors. A different model
+    # has a different distance distribution, so MATCH_THRESHOLD (versions 1–3)
+    # does not carry over. PROVISIONAL: calibrate on your own data with
+    # backend/scripts/benchmark_engines.py and the bias-audit notebook
+    # (AGENTS.md §8) before relying on it.
+    match_threshold_insightface: float = 0.60
+    insightface_model_dir: str = "~/.insightface/models/buffalo_l"
+    # Download the pinned buffalo_l pack on first use if files are missing.
+    insightface_auto_download: bool = True
+    # SCRFD input size (square) and minimum face score.
+    insightface_det_size: int = 640
+    insightface_det_threshold: float = 0.5
+    # Upper bound on the ONNX Runtime CUDA memory arena.
+    insightface_gpu_mem_limit_mb: int = 1536
 
     # ArcFace embedding quality settings
     # normalization must match the backbone's training recipe:
@@ -121,3 +141,19 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+if settings.embedding_version not in SUPPORTED_EMBEDDING_VERSIONS:
+    raise ValueError(
+        f"EMBEDDING_VERSION={settings.embedding_version} is not one of "
+        f"{SUPPORTED_EMBEDDING_VERSIONS}"
+    )
+
+# Recipe used for new enrollments and re-enrollments.
+CURRENT_EMBEDDING_VERSION = settings.embedding_version
+
+
+def match_threshold_for_version(version: int) -> float:
+    """Cosine-distance threshold for vectors of the given embedding version."""
+    if version == INSIGHTFACE_EMBEDDING_VERSION:
+        return settings.match_threshold_insightface
+    return settings.match_threshold

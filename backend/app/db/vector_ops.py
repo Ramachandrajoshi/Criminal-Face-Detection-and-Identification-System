@@ -9,7 +9,7 @@ from typing import Optional
 import numpy as np
 from sqlalchemy import text
 
-from app.core.config import CURRENT_EMBEDDING_VERSION, settings
+from app.core.config import CURRENT_EMBEDDING_VERSION, match_threshold_for_version
 from app.core.crypto import decrypt_embedding_bytes, encrypt_embedding_vector
 
 
@@ -36,11 +36,15 @@ async def cosine_ann_query(
     Returns a list of dicts: {id, person_name, alias, distance, ...}
     sorted by ascending distance (closest match first).
 
-    threshold defaults to MATCH_THRESHOLD from config.
+    threshold defaults to the configured threshold for ``target_version``
+    (MATCH_THRESHOLD for versions 1–3, MATCH_THRESHOLD_INSIGHTFACE for 4).
     tenant_id filters results to the requesting tenant (defense in depth
     alongside PostgreSQL RLS).
     """
-    threshold = threshold if threshold is not None else settings.match_threshold
+    if threshold is None:
+        threshold = match_threshold_for_version(
+            target_version if target_version is not None else CURRENT_EMBEDDING_VERSION
+        )
 
     if isinstance(query_vector, (bytes, bytearray)):
         query_vector = decrypt_embedding_bytes(bytes(query_vector)).tolist()

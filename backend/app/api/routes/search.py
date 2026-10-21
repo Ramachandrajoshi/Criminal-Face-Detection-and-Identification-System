@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
-from app.core.config import settings
+from app.core.config import CURRENT_EMBEDDING_VERSION, match_threshold_for_version, settings
 from app.core.pipeline import run_pipeline
 from app.core.validation import validate_image_dimensions
 from app.db.session import async_session_factory, get_session
@@ -143,7 +143,7 @@ async def search_face(
         matches=matches,
         gps_lat=gps_lat,
         gps_lon=gps_lon,
-        match_threshold=settings.match_threshold,
+        match_threshold=match_threshold_for_version(CURRENT_EMBEDDING_VERSION),
         alert_id=alert_id,
     )
 
