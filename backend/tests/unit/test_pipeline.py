@@ -1428,3 +1428,46 @@ class TestMixedVersionSearch:
 
         assert result["status"] == "NO_MATCH"
         insight.assert_not_called()
+
+
+# ──────────────────────────────────────────────
+# GPU memory configuration (TensorFlow)
+# ──────────────────────────────────────────────
+
+class TestConfigureGpu:
+    def _fake_tf(self, n_gpus=1):
+        import sys
+        tf = MagicMock()
+        tf.config.list_physical_devices.return_value = [MagicMock(name=f"gpu{i}") for i in range(n_gpus)]
+        return patch.dict(sys.modules, {"tensorflow": tf}), tf
+
+    def test_hard_cap_when_limit_is_set(self):
+        from app.main import _configure_gpu
+
+        mods, tf = self._fake_tf()
+        with mods, patch("app.main.settings.enable_gpu", True), \
+             patch("app.main.settings.tf_gpu_memory_limit_mb", 3072):
+            _configure_gpu()
+
+        tf.config.LogicalDeviceConfiguration.assert_called_once_with(memory_limit=3072)
+        tf.config.set_logical_device_configuration.assert_called_once()
+        tf.config.experimental.set_memory_growth.assert_not_called()
+
+    def test_memory_growth_by_default(self):
+        from app.main import _configure_gpu
+
+        mods, tf = self._fake_tf(n_gpus=2)
+        with mods, patch("app.main.settings.enable_gpu", True), \
+             patch("app.main.settings.tf_gpu_memory_limit_mb", 0):
+            _configure_gpu()
+
+        assert tf.config.experimental.set_memory_growth.call_count == 2
+        tf.config.set_logical_device_configuration.assert_not_called()
+
+    def test_gpu_disabled_never_touches_tensorflow(self):
+        from app.main import _configure_gpu
+
+        mods, tf = self._fake_tf()
+        with mods, patch("app.main.settings.enable_gpu", False):
+            _configure_gpu()
+        tf.config.list_physical_devices.assert_not_called()

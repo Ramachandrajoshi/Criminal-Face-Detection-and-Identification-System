@@ -33,18 +33,16 @@ def _configure_gpu() -> None:
     NVIDIA GPU, or ENABLE_GPU=false, this function falls back to CPU-only mode
     gracefully without raising an exception.
 
-    Memory strategy — memory growth (not a hard VRAM cap):
-      ``tf.config.experimental.set_memory_growth`` tells TF to allocate VRAM
-      incrementally as tensors are created, rather than reserving the full card
-      upfront.  This is the right strategy for a shared GPU server where other
-      processes (e.g. llama-server) also hold VRAM.
+    Memory strategy
+      * TF_GPU_MEMORY_LIMIT_MB > 0 — hard cap. TF gets a logical device with
+        exactly that much VRAM (reserved at startup) and can never grow past
+        it. Use this to keep the project inside a fixed VRAM budget on a
+        shared card; the InsightFace engine has its own separate cap
+        (INSIGHTFACE_GPU_MEM_LIMIT_MB).
+      * TF_GPU_MEMORY_LIMIT_MB = 0 (default) — memory growth: TF allocates
+        VRAM on demand. No upper bound — on a large card TF can keep growing.
 
-      ``set_logical_device_configuration(memory_limit=...)`` is the alternative
-      hard-cap approach, but it is **mutually exclusive** with memory growth and
-      requires parsing the total VRAM size via a separate API call that expects
-      a short device name (``"GPU:0"``) rather than the full path that
-      ``PhysicalDevice.name`` returns (``"/physical_device:GPU:0"``).
-      We therefore do NOT use it here.
+      The two are mutually exclusive in TF, so exactly one is applied.
     """
     if not settings.enable_gpu:
         logger.info("GPU disabled via ENABLE_GPU=false — running in CPU-only mode")
@@ -64,20 +62,30 @@ def _configure_gpu() -> None:
             )
             return
 
-        # Enable per-GPU memory growth.  Must be called before any TF op runs.
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-
         # PhysicalDevice.name → "/physical_device:GPU:0"
         # Strip prefix for readable log output → "GPU:0"
         short_names = [g.name.replace("/physical_device:", "") for g in gpus]
 
-        logger.info(
-            "GPU configured: %d device(s) available — memory growth enabled "
-            "(TF allocates VRAM on demand). Devices: %s",
-            len(gpus),
-            short_names,
-        )
+        # Must be configured before any TF op runs.
+        limit_mb = settings.tf_gpu_memory_limit_mb
+        if limit_mb > 0:
+            for gpu in gpus:
+                tf.config.set_logical_device_configuration(
+                    gpu, [tf.config.LogicalDeviceConfiguration(memory_limit=limit_mb)]
+                )
+            logger.info(
+                "GPU configured: %d device(s), TF VRAM capped at %d MB each. Devices: %s",
+                len(gpus), limit_mb, short_names,
+            )
+        else:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logger.info(
+                "GPU configured: %d device(s) available — memory growth enabled "
+                "(TF allocates VRAM on demand). Devices: %s",
+                len(gpus),
+                short_names,
+            )
 
     except Exception as exc:  # noqa: BLE001 — never crash the server over GPU config
         logger.warning(

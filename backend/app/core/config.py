@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     # Set ENABLE_GPU=false in .env to force CPU-only mode (e.g. on machines
     # without a CUDA-capable GPU or NVIDIA Container Toolkit).
     enable_gpu: bool = True
+    # Hard VRAM cap for TensorFlow (DeepFace models), in MB. 0 = no cap
+    # (memory growth). The InsightFace engine is capped separately by
+    # INSIGHTFACE_GPU_MEM_LIMIT_MB; both share one CUDA context (~0.3–0.5 GB).
+    tf_gpu_memory_limit_mb: int = 0
 
     # Size of the dedicated thread pool used to offload blocking DeepFace/OpenCV
     # calls off the event loop (see app/core/inference_executor.py). Bounds how
