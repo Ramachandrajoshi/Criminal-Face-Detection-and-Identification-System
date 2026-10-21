@@ -53,6 +53,7 @@ project-root/
 │   │   │   │   └── audit.py
 │   │   ├── core/
 │   │   │   ├── pipeline.py    ← deepface wrapper (detect→align→normalize→represent→verify)
+│   │   │   ├── face_engine.py ← InsightFace ONNX engine (embedding version 4)
 │   │   │   ├── liveness.py    ← anti-spoofing module
 │   │   │   └── config.py      ← env-driven settings (thresholds, model names)
 │   │   ├── db/
@@ -61,6 +62,9 @@ project-root/
 │   │   │   └── vector_ops.py  ← pgvector ANN query helpers
 │   │   └── schemas/
 │   │       └── face.py        ← Pydantic request/response models
+│   ├── scripts/
+│   │   ├── hash_password.py
+│   │   └── benchmark_engines.py ← accuracy/latency comparison of embedding versions
 │   ├── tests/
 │   │   ├── unit/
 │   │   └── integration/
@@ -137,6 +141,10 @@ D_L2(û, v̂) = sqrt(sum((û_i - v̂_i)²))
 Match threshold `T = 0.58` (cosine). This value lives in `backend/app/core/config.py`
 as `MATCH_THRESHOLD` and must **never** be hard-coded elsewhere.
 
+Each embedding model has its own distance scale, so embedding version 4 (InsightFace)
+uses `MATCH_THRESHOLD_INSIGHTFACE` instead. Resolve thresholds only through
+`match_threshold_for_version()` in `config.py`.
+
 ---
 
 ## 4. Database Schema — Do Not Modify Without Migration
@@ -191,8 +199,25 @@ No other backbone may be introduced without a PR updating this file.
 | FaceNet                         | 128 / 512      | Triplet Loss                    | Benchmark comparison only                        |
 | VGG-Face                        | 4096           | Softmax / Cross-Entropy         | Benchmark comparison only (high-quality frontal) |
 | SFace                           | 512            | Sigmoid-Constrained Hypersphere | Low-resolution CCTV benchmark                    |
+| InsightFace `buffalo_l` (ArcFace R50, WebFace600K) + SCRFD-10G | 512 | Additive Angular Margin | Embedding version 4 (opt-in via `EMBEDDING_VERSION=4`): faster, template-aligned matching. **Weights are non-commercial research use only.** |
 
-Detector backends in priority order: `retinaface` → `mtcnn` → `opencv`.
+Detector backends in priority order: `retinaface` → `mtcnn` → `opencv`
+(DeepFace, embedding versions 1–3). Version 4 uses SCRFD-10G from the same
+`buffalo_l` pack.
+
+### Embedding versions
+
+Every stored vector carries `embedding_version`. Search embeds the query once per
+version present for the tenant and compares each version only against its own
+vectors, so switching `EMBEDDING_VERSION` never invalidates registered faces —
+they keep matching until re-enrolled under the new version.
+
+| Version | Engine | Notes |
+| ------- | ------ | ----- |
+| 1–3 | DeepFace ArcFace + `_preprocess_for_arcface` recipe | Default (`EMBEDDING_VERSION=3`) |
+| 4 | InsightFace ONNX (`face_engine.py`) | Own threshold `MATCH_THRESHOLD_INSIGHTFACE`; calibrate with `scripts/benchmark_engines.py` + bias audit (§8) |
+
+Changing how an existing version produces embeddings is forbidden — add a new version.
 
 The active model and detector are set via environment variables:
 
@@ -200,6 +225,8 @@ The active model and detector are set via environment variables:
 DEEPFACE_MODEL=ArcFace
 DEEPFACE_DETECTOR=retinaface
 MATCH_THRESHOLD=0.58
+EMBEDDING_VERSION=3              # 4 = InsightFace for new enrollments
+MATCH_THRESHOLD_INSIGHTFACE=0.60 # provisional; version 4 only
 ```
 
 ---
@@ -353,6 +380,11 @@ Never commit a `.env` file.
 DEEPFACE_MODEL=ArcFace
 DEEPFACE_DETECTOR=retinaface
 MATCH_THRESHOLD=0.58
+EMBEDDING_VERSION=3
+MATCH_THRESHOLD_INSIGHTFACE=0.60
+INSIGHTFACE_MODEL_DIR=~/.insightface/models/buffalo_l
+INSIGHTFACE_AUTO_DOWNLOAD=true
+INSIGHTFACE_GPU_MEM_LIMIT_MB=1536
 
 # Database
 POSTGRES_HOST=localhost
@@ -536,4 +568,4 @@ any of these, the agent must stop and flag for human review.
 
 ---
 
-*Last updated: 2026-05-24*
+*Last updated: 2026-10-21*

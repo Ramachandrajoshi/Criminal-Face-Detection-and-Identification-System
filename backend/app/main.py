@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import settings
+from app.core.config import CURRENT_EMBEDDING_VERSION, INSIGHTFACE_EMBEDDING_VERSION, settings
 from app.core.inference_executor import get_executor
 from app.core.middleware import AuthMiddleware
 from app.db.migrations.runner import run_migrations
@@ -128,6 +128,16 @@ def _warmup_models() -> None:
             logger.info("Warmed detector backends")
     except Exception as exc:  # noqa: BLE001
         logger.warning("Detector warm-up failed (%s) — will load lazily on first request", exc)
+
+    if CURRENT_EMBEDDING_VERSION == INSIGHTFACE_EMBEDDING_VERSION:
+        try:
+            from app.core.face_engine import get_engine
+
+            # Loads (and on first run downloads) the ONNX models pre-traffic.
+            engine = get_engine()
+            logger.info("Warmed InsightFace engine (providers=%s)", engine.providers)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("InsightFace warm-up failed (%s) — will load lazily on first request", exc)
 
     logger.info("Model warm-up finished in %.0fms", (time.perf_counter() - start) * 1000)
 

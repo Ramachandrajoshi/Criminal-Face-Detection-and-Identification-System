@@ -63,9 +63,21 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
+# ── ONNX Runtime GPU for the InsightFace engine (EMBEDDING_VERSION=4) ────────
+# deepface pulls in the CPU-only `onnxruntime`; it and `onnxruntime-gpu` install
+# into the same module, so the CPU build is removed first.
+# onnxruntime-gpu ≥ 1.19 targets CUDA 12 + cuDNN 9, while this image ships
+# cuDNN 8.9 for TensorFlow. cuDNN 9 comes from the nvidia-cudnn-cu12 wheel —
+# a different soname (libcudnn.so.9), so it coexists with TF's libcudnn.so.8;
+# app/core/face_engine.py preloads it. Without a working CUDA provider the
+# engine logs its providers and runs on CPU.
+RUN pip uninstall -y onnxruntime \
+ && pip install --no-cache-dir "onnxruntime-gpu==1.22.0" "nvidia-cudnn-cu12==9.8.0.87"
+
 # ── App code ──────────────────────────────────────────────────────────────────
 COPY ./app ./app
 COPY ./tests ./tests
+COPY ./scripts ./scripts
 COPY ./pyproject.toml .
 ENV PYTHONPATH=/app
 

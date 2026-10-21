@@ -1195,3 +1195,236 @@ class TestPreprocessingRegression:
 
         with pytest.raises(ValueError, match="Unsupported embedding version"):
             _preprocess_for_arcface(np.zeros((112, 112, 3), dtype=np.uint8), version=99)
+
+
+# ──────────────────────────────────────────────
+# Embedding version 4 (InsightFace) alongside versions 1–3
+# ──────────────────────────────────────────────
+
+def _real_jpeg_bytes():
+    import cv2
+    ok, buf = cv2.imencode(".jpg", np.full((64, 64, 3), 128, np.uint8))
+    return buf.tobytes()
+
+
+class TestEmbedWithInsightface:
+    def _engine(self, faces):
+        engine = MagicMock()
+        engine.detect.return_value = faces
+        engine.align.side_effect = lambda frame, kps: np.zeros((112, 112, 3), np.uint8)
+        engine.embed.return_value = np.ones(512, np.float32) / np.sqrt(512)
+        return engine
+
+    def test_embeds_the_largest_face(self):
+        from app.core.face_engine import DetectedFace
+        from app.core.pipeline import embed_with_insightface
+
+        small = DetectedFace(np.array([0, 0, 10, 10.0]), 0.99, np.full((5, 2), 1.0))
+        large = DetectedFace(np.array([0, 0, 40, 40.0]), 0.60, np.full((5, 2), 2.0))
+        engine = self._engine([small, large])
+
+        with patch("app.core.face_engine.get_engine", return_value=engine):
+            emb = embed_with_insightface(_real_jpeg_bytes())
+
+        assert emb.shape == (512,)
+        np.testing.assert_array_equal(engine.align.call_args.args[1], large.landmarks)
+
+    def test_no_face_returns_none(self):
+        from app.core.pipeline import embed_with_insightface
+
+        with patch("app.core.face_engine.get_engine", return_value=self._engine([])):
+            assert embed_with_insightface(_real_jpeg_bytes()) is None
+
+    def test_undecodable_bytes_return_none(self):
+        from app.core.pipeline import embed_with_insightface
+
+        with patch("app.core.face_engine.get_engine") as get_engine:
+            assert embed_with_insightface(b"not an image") is None
+        get_engine.assert_not_called()
+
+
+def _v4_current():
+    return patch("app.core.pipeline.CURRENT_EMBEDDING_VERSION", 4)
+
+
+class TestVersion4Enrollment:
+    """EMBEDDING_VERSION=4 enrols through InsightFace, never through DeepFace."""
+
+    async def test_register_uses_insightface(self, mock_embedding):
+        from app.core.pipeline import register_pipeline
+
+        with _v4_current(), \
+             patch("app.core.pipeline.embed_with_insightface", return_value=mock_embedding) as insight, \
+             patch("app.core.pipeline.detect_face") as deepface_detect, \
+             patch("app.db.vector_ops.register_profile", AsyncMock(return_value=7)) as reg, \
+             patch("app.db.vector_ops.add_audit_entry", AsyncMock(return_value=1)):
+            result = await register_pipeline(make_test_image(), AsyncMock(), "Name")
+
+        assert result["status"] == "REGISTERED"
+        insight.assert_called_once()
+        deepface_detect.assert_not_called()
+        np.testing.assert_array_equal(reg.await_args.args[4], mock_embedding)
+
+    async def test_reenroll_uses_insightface(self, mock_embedding):
+        from app.core.pipeline import reenroll_pipeline
+
+        with _v4_current(), \
+             patch("app.core.pipeline.embed_with_insightface", return_value=mock_embedding), \
+             patch("app.core.pipeline.detect_face") as deepface_detect, \
+             patch("app.db.vector_ops.update_face_embedding", AsyncMock(return_value=True)), \
+             patch("app.db.vector_ops.add_audit_entry", AsyncMock(return_value=1)):
+            result = await reenroll_pipeline(make_test_image(), AsyncMock(), 5, "Name")
+
+        assert result["status"] == "RE_ENROLLED"
+        deepface_detect.assert_not_called()
+
+    @pytest.mark.parametrize("engine_result,error", [
+        ("none", "No face detected in the uploaded image"),
+        ("raise", "Embedding extraction failed"),
+    ])
+    async def test_register_errors(self, engine_result, error):
+        from app.core.pipeline import register_pipeline
+
+        effect = RuntimeError("model missing") if engine_result == "raise" else None
+        with _v4_current(), \
+             patch("app.core.pipeline.embed_with_insightface", return_value=None, side_effect=effect), \
+             patch("app.db.vector_ops.register_profile", AsyncMock()) as reg:
+            result = await register_pipeline(make_test_image(), AsyncMock(), "Name")
+
+        assert result == {"status": "ERROR", "error": error}
+        reg.assert_not_awaited()
+
+
+class TestMixedVersionSearch:
+    """Faces enrolled under DeepFace (1–3) keep matching after switching to 4."""
+
+    def _patches(self, present, deepface_face=True, insight=None):
+        insight = np.full(512, 4, np.float32) if insight is None else insight
+        return (
+            _mock_present_versions(present),
+            patch("app.core.pipeline.detect_face",
+                  return_value=np.zeros((112, 112, 3)) if deepface_face else None),
+            patch("app.core.pipeline.extract_embedding",
+                  side_effect=lambda face, version: np.full(512, version, dtype=np.float32)),
+            patch("app.core.pipeline.embed_with_insightface",
+                  side_effect=insight if isinstance(insight, Exception) else None,
+                  return_value=None if isinstance(insight, Exception) else insight),
+        )
+
+    async def test_old_faces_still_match_after_switching_to_v4(self):
+        from app.core.pipeline import run_pipeline
+
+        async def verify(embedding, session, **kwargs):
+            v = kwargs["target_version"]
+            return [{"id": 30, "distance": 0.2, "embedding_version": 3}] if v == 3 else []
+
+        p = self._patches({3})
+        with _v4_current(), p[0], p[1], p[2], p[3] as insight, \
+             patch("app.core.pipeline.verify_match", side_effect=verify) as vm:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "MATCH"
+        assert result["matches"][0]["id"] == 30
+        # v4 is embedded for the audit hash even with nothing enrolled under it,
+        # but only the enrolled recipe is queried.
+        insight.assert_called_once()
+        assert [c.kwargs["target_version"] for c in vm.await_args_list] == [3]
+
+    async def test_each_version_is_queried_with_its_own_threshold(self):
+        from app.core.config import settings
+        from app.core.pipeline import run_pipeline
+
+        p = self._patches({4, 3})
+        with _v4_current(), p[0], p[1], p[2], p[3], \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])) as vm:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "NO_MATCH"
+        thresholds = {c.kwargs["target_version"]: c.kwargs["threshold"] for c in vm.await_args_list}
+        assert thresholds == {4: settings.match_threshold_insightface, 3: settings.match_threshold}
+
+    async def test_ranking_is_relative_to_each_models_threshold(self):
+        from app.core.pipeline import run_pipeline
+
+        # 0.40 under a 0.80 threshold (half-way) beats 0.35 under a 0.50 one.
+        hits = {
+            4: [{"id": 44, "distance": 0.40}],
+            3: [{"id": 33, "distance": 0.35}],
+        }
+
+        async def verify(embedding, session, **kwargs):
+            return list(hits[kwargs["target_version"]])
+
+        p = self._patches({4, 3})
+        with _v4_current(), p[0], p[1], p[2], p[3], \
+             patch("app.core.pipeline.settings.match_threshold", 0.50), \
+             patch("app.core.pipeline.settings.match_threshold_insightface", 0.80), \
+             patch("app.core.pipeline.verify_match", side_effect=verify):
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert [m["id"] for m in result["matches"]] == [44, 33]
+
+    async def test_no_face_from_every_engine_is_no_face(self):
+        from app.core.pipeline import run_pipeline
+
+        p = self._patches({4, 3}, deepface_face=False)
+        with _v4_current(), p[0], p[1], p[2], p[3] as insight, \
+             patch("app.core.pipeline.verify_match", AsyncMock()) as vm:
+            insight.return_value = None
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result == {"status": "ERROR", "error": "No face detected", "matches": []}
+        vm.assert_not_awaited()
+
+    async def test_insightface_finds_the_face_deepface_missed(self):
+        """A v4 hit is returned even when the DeepFace detector saw nothing."""
+        from app.core.pipeline import run_pipeline
+
+        async def verify(embedding, session, **kwargs):
+            return [{"id": 44, "distance": 0.3}]
+
+        p = self._patches({4, 3}, deepface_face=False)
+        with _v4_current(), p[0], p[1], p[2], p[3], \
+             patch("app.core.pipeline.verify_match", side_effect=verify) as vm:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "MATCH"
+        assert [c.kwargs["target_version"] for c in vm.await_args_list] == [4]
+
+    async def test_partial_detection_without_match_is_not_a_clean_no_match(self):
+        """v3 vectors were never compared, so this must not read as NO_MATCH."""
+        from app.core.pipeline import run_pipeline
+
+        p = self._patches({4, 3}, deepface_face=False)
+        with _v4_current(), p[0], p[1], p[2], p[3], \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])):
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "ERROR"
+        assert result["error"] == "Embedding extraction failed"
+
+    async def test_insightface_engine_failure_keeps_deepface_results(self):
+        from app.core.pipeline import run_pipeline
+
+        async def verify(embedding, session, **kwargs):
+            return [{"id": 33, "distance": 0.2}]
+
+        p = self._patches({4, 3}, insight=RuntimeError("onnx failed"))
+        with _v4_current(), p[0], p[1], p[2], p[3], \
+             patch("app.core.pipeline.verify_match", side_effect=verify) as vm:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "MATCH"
+        assert [c.kwargs["target_version"] for c in vm.await_args_list] == [3]
+
+    async def test_default_v3_deployment_never_loads_insightface(self):
+        """With EMBEDDING_VERSION=3 and no v4 rows the new engine is untouched."""
+        from app.core.pipeline import run_pipeline
+
+        p = self._patches({3, 2})
+        with p[0], p[1], p[2], p[3] as insight, \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])):
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "NO_MATCH"
+        insight.assert_not_called()

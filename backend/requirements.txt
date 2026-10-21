@@ -17,6 +17,8 @@ deepface>=0.0.100
 tensorflow==2.16.1
 tf-keras==2.16.0
 opencv-python>=4.9.0
+# InsightFace engine (EMBEDDING_VERSION=4) runs on onnxruntime, which deepface
+# already installs (CPU build). The Dockerfile swaps in onnxruntime-gpu.
 numpy>=1.24.0
 pillow>=10.2.0
 

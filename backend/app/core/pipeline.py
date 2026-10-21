@@ -7,6 +7,11 @@ Stage 3 — NORMALIZE: Resize & pixel normalisation
 Stage 4 — REPRESENT: deepface.represent() → 512-d ArcFace embedding
 Stage 5 — VERIFY   : pgvector cosine ANN query
 
+Embedding versions 1–3 run stages 1–4 through DeepFace (``detect_face`` +
+``extract_embedding``). Version 4 runs them through the InsightFace ONNX
+engine (``embed_with_insightface``, see app/core/face_engine.py). Stage 5 is
+shared: each version is queried against its own vectors.
+
 Liveness / Anti-spoofing policy
 ---------------------------------
 Liveness detection is only meaningful for **live camera captures**.  It works
@@ -32,7 +37,10 @@ from fastapi import UploadFile
 
 from app.core.config import (
     CURRENT_EMBEDDING_VERSION,
+    DEEPFACE_EMBEDDING_VERSIONS,
+    INSIGHTFACE_EMBEDDING_VERSION,
     SUPPORTED_EMBEDDING_VERSIONS,
+    match_threshold_for_version,
     settings,
 )
 from app.core.inference_executor import get_executor
@@ -186,10 +194,10 @@ def _preprocess_for_arcface(
     import cv2
     import math
 
-    if version not in SUPPORTED_EMBEDDING_VERSIONS:
+    if version not in DEEPFACE_EMBEDDING_VERSIONS:
         raise ValueError(
             f"Unsupported embedding version: {version} "
-            f"(supported: {SUPPORTED_EMBEDDING_VERSIONS})"
+            f"(supported: {DEEPFACE_EMBEDDING_VERSIONS})"
         )
 
     # ── Step 0: uint8 conversion ─────────────────────────────────────────────
@@ -356,6 +364,91 @@ def extract_embedding(
     return embedding
 
 
+# ---------- Stages 1-4 for version 4: InsightFace ----------
+def embed_with_insightface(image_bytes: bytes) -> Optional[np.ndarray]:
+    """
+    Detect, align and embed the largest face with the InsightFace engine.
+
+    Returns the L2-normalised 512-d embedding, or None when no face is found.
+    Engine failures (missing weights, ONNX Runtime errors) raise — callers
+    treat those as an embedding failure rather than "no face".
+    """
+    import cv2
+
+    from app.core.face_engine import get_engine
+
+    frame = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        logger.error("Failed to decode image bytes")
+        return None
+
+    engine = get_engine()
+    faces = engine.detect(frame)
+    if not faces:
+        logger.debug("InsightFace: no face above det threshold")
+        return None
+
+    best = max(faces, key=lambda f: f.area)
+    logger.debug("InsightFace: face score=%.2f area=%.0f", best.score, best.area)
+    return engine.embed(engine.align(frame, best.landmarks))
+
+
+class _NoFace:
+    """Marker: the engine ran and found no face (as opposed to failing)."""
+
+
+_NO_FACE = _NoFace()
+
+
+async def _embed_versions(content: bytes, versions: list[int]) -> dict:
+    """
+    Embed ``content`` under each requested version.
+
+    Returns {version: embedding | None | _NO_FACE}. DeepFace versions share one
+    detection pass; InsightFace runs its own detector. Both engines run
+    concurrently on the inference pool.
+    """
+    loop = asyncio.get_running_loop()
+    executor = get_executor()
+    deepface_versions = [v for v in versions if v in DEEPFACE_EMBEDDING_VERSIONS]
+
+    async def run_deepface() -> dict:
+        if not deepface_versions:
+            return {}
+        aligned = await loop.run_in_executor(executor, detect_face, content)
+        if aligned is None:
+            return {v: _NO_FACE for v in deepface_versions}
+        # Independent work — run it on the inference pool concurrently rather
+        # than serially, so wall-clock stays at roughly one embedding.
+        embeddings = await asyncio.gather(
+            *(loop.run_in_executor(executor, extract_embedding, aligned, v) for v in deepface_versions)
+        )
+        return dict(zip(deepface_versions, embeddings))
+
+    async def run_insightface() -> dict:
+        if INSIGHTFACE_EMBEDDING_VERSION not in versions:
+            return {}
+        try:
+            embedding = await loop.run_in_executor(executor, embed_with_insightface, content)
+        except Exception as exc:  # noqa: BLE001 — engine failure, not "no face"
+            logger.error("InsightFace embedding failed: %s", exc)
+            return {INSIGHTFACE_EMBEDDING_VERSION: None}
+        return {INSIGHTFACE_EMBEDDING_VERSION: _NO_FACE if embedding is None else embedding}
+
+    deepface_result, insightface_result = await asyncio.gather(run_deepface(), run_insightface())
+    return {**deepface_result, **insightface_result}
+
+
+async def _embed_for_enrollment(content: bytes) -> tuple[Optional[np.ndarray], Optional[str]]:
+    """Embed under the current recipe. Returns (embedding, error message)."""
+    result = (await _embed_versions(content, [CURRENT_EMBEDDING_VERSION]))[CURRENT_EMBEDDING_VERSION]
+    if result is _NO_FACE:
+        return None, "No face detected in the uploaded image"
+    if result is None:
+        return None, "Embedding extraction failed"
+    return result, None
+
+
 # ---------- Stage 5: VERIFY (ANN query) ----------
 async def verify_match(
     embedding: np.ndarray,
@@ -371,6 +464,10 @@ async def verify_match(
     """
     from app.db.vector_ops import cosine_ann_query
 
+    if threshold is None:
+        threshold = match_threshold_for_version(
+            target_version if target_version is not None else CURRENT_EMBEDDING_VERSION
+        )
     query_hash = compute_query_hash(embedding.tobytes())
     matches = await cosine_ann_query(
         session,
@@ -483,12 +580,7 @@ async def run_pipeline(
                 "gps_lon": gps_lon,
             }
 
-    # ── Stage 1: Detect ───────────────────────────────────────────
-    aligned = await loop.run_in_executor(executor, detect_face, content)
-    if aligned is None:
-        return {"status": "ERROR", "error": "No face detected", "matches": []}
-
-    # ── Stage 4: Represent ────────────────────────────────────────
+    # ── Stages 1–4: Detect → Represent ────────────────────────────
     # A stored vector is only comparable to a query embedded with the same
     # recipe, so the query is embedded once per recipe still in use. Recipes
     # with no enrolled rows for this tenant can never match, so they are not
@@ -503,19 +595,13 @@ async def run_pipeline(
     # query image, not on which recipe happened to hold the match.
     to_embed = sorted({*searchable, CURRENT_EMBEDDING_VERSION}, reverse=True)
 
-    # Independent work — run it on the inference pool concurrently rather than
-    # serially, so wall-clock stays at roughly one embedding.
-    embeddings = dict(
-        zip(
-            to_embed,
-            await asyncio.gather(
-                *(
-                    loop.run_in_executor(executor, extract_embedding, aligned, v)
-                    for v in to_embed
-                )
-            ),
-        )
-    )
+    results = await _embed_versions(content, to_embed)
+    if all(r is _NO_FACE for r in results.values()):
+        return {"status": "ERROR", "error": "No face detected", "matches": []}
+
+    # An engine that found no face where another did is treated like a failed
+    # extraction for its recipes: those vectors were not compared.
+    embeddings = {v: (None if r is _NO_FACE else r) for v, r in results.items()}
 
     # Prefer the current recipe's hash; fall back to the newest that succeeded
     # so a failed extraction still leaves a usable audit trail.
@@ -533,21 +619,27 @@ async def run_pipeline(
     # merged and ranked by distance. Ranking globally rather than returning
     # the newest recipe's hits means a closer match in an older recipe is
     # never masked by a weaker one in a newer recipe.
+    #
+    # Different models have different distance scales, so hits are ranked by
+    # distance relative to their own recipe's threshold. Recipes that share a
+    # threshold (1–3) therefore still rank purely by distance.
     searched = [v for v in searchable if embeddings[v] is not None]
     per_version = await asyncio.gather(
         *(
             verify_match(
-                embeddings[v], session, threshold=settings.match_threshold,
+                embeddings[v], session, threshold=match_threshold_for_version(v),
                 limit=limit, tenant_id=tenant_id, target_version=v,
             )
             for v in searched
         )
     )
 
-    matches = sorted(
-        (m for group in per_version for m in group),
-        key=lambda m: m["distance"],
-    )[:limit]
+    ranked = sorted(
+        ((m["distance"] / match_threshold_for_version(v), m)
+         for v, group in zip(searched, per_version) for m in group),
+        key=lambda pair: pair[0],
+    )
+    matches = [m for _, m in ranked[:limit]]
 
     if matches:
         return {
@@ -598,18 +690,11 @@ async def register_pipeline(
     Returns a dict with keys: status, profile_id, query_hash, embedding_dim.
     """
     content = await file.read()
-    loop = asyncio.get_running_loop()
-    executor = get_executor()
 
-    # Stage 1: Detect
-    aligned = await loop.run_in_executor(executor, detect_face, content)
-    if aligned is None:
-        return {"status": "ERROR", "error": "No face detected in the uploaded image"}
-
-    # Stage 4: Represent
-    embedding = await loop.run_in_executor(executor, extract_embedding, aligned)
+    # Stages 1–4 under the current recipe (EMBEDDING_VERSION)
+    embedding, error = await _embed_for_enrollment(content)
     if embedding is None:
-        return {"status": "ERROR", "error": "Embedding extraction failed"}
+        return {"status": "ERROR", "error": error}
 
     from app.db.vector_ops import add_audit_entry, register_profile
 
@@ -654,18 +739,11 @@ async def reenroll_pipeline(
       embedding_dim — 512 for ArcFace
     """
     content = await file.read()
-    loop = asyncio.get_running_loop()
-    executor = get_executor()
 
-    # Stage 1: Detect
-    aligned = await loop.run_in_executor(executor, detect_face, content)
-    if aligned is None:
-        return {"status": "ERROR", "error": "No face detected in the uploaded image"}
-
-    # Stage 4: Represent
-    embedding = await loop.run_in_executor(executor, extract_embedding, aligned)
+    # Stages 1–4 under the current recipe (EMBEDDING_VERSION)
+    embedding, error = await _embed_for_enrollment(content)
     if embedding is None:
-        return {"status": "ERROR", "error": "Embedding extraction failed"}
+        return {"status": "ERROR", "error": error}
 
     from app.db.vector_ops import add_audit_entry, update_face_embedding
 
