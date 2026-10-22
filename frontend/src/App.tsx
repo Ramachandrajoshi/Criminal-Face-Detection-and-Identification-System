@@ -7,8 +7,9 @@ import LiveCameraScreen from './components/screens/LiveCameraScreen';
 import MapScreen from './components/screens/MapScreen';
 import RegisterScreen from './components/screens/RegisterScreen';
 import AlertsScreen from './components/screens/AlertsScreen';
+import PoseEnrollScreen from './components/screens/PoseEnrollScreen';
 
-export type Tab = 'overview' | 'search' | 'camera' | 'map' | 'register' | 'alerts';
+export type Tab = 'overview' | 'search' | 'camera' | 'map' | 'register' | 'pose' | 'alerts';
 
 // ── Auth Guard: redirect to login if not authenticated ──────────
 
@@ -124,6 +125,7 @@ function AppContent(): JSX.Element {
     { id: 'camera', label: 'Live Feed', icon: '📷' },
     // { id: 'map', label: 'GPS Map', icon: '🗺️' },
     { id: 'register', label: 'Register Roster', icon: '👤' },
+    { id: 'pose', label: 'Pose Enrolment', icon: '🎯' },
     { id: 'alerts', label: 'Alerts Panel', icon: '🔔' },
   ];
 
@@ -226,6 +228,7 @@ function AppContent(): JSX.Element {
         {activeTab === 'camera' && <LiveCameraScreen />}
         {activeTab === 'map' && <MapScreen />}
         {activeTab === 'register' && <RegisterScreen />}
+        {activeTab === 'pose' && <PoseEnrollScreen />}
         {activeTab === 'alerts' && <AlertsScreen />}
       </main>
     </div>

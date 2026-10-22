@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     # Upper bound on the ONNX Runtime CUDA memory arena.
     insightface_gpu_mem_limit_mb: int = 1536
 
+    # --- Pose-aware enrollment & search (/api/v1/pose/*) ---
+    # Always InsightFace (version 4), independent of EMBEDDING_VERSION.
+    # Faces turned further than this are rejected: past ~80° yaw the eye and
+    # mouth landmarks are guesses and the embedding is not trustworthy.
+    pose_max_yaw_deg: float = 80.0
+    pose_max_pitch_deg: float = 50.0
+    # Upper bound on stored pose embeddings per face profile.
+    pose_max_per_face: int = 20
+
     # ArcFace embedding quality settings
     # normalization must match the backbone's training recipe:
     #   "ArcFace"  → (pixel − 127.5) / 128   ← correct for ArcFace/InsightFace

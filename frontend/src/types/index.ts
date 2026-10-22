@@ -104,6 +104,62 @@ export interface FaceProfile {
   createdAt: string; // ISO-8601
 }
 
+// ── Pose-aware enrollment & search (/api/v1/pose/*) ──────────────
+// yaw > 0: nose toward image-right of the raw (unmirrored) camera frame,
+// i.e. the subject turned to *their* left. pitch > 0: looking up.
+export interface PoseInfo {
+  yaw: number;
+  pitch: number;
+  roll: number;
+  bucket: string;
+  quality: number;
+}
+
+export interface PoseEstimateResponse {
+  faceFound: boolean;
+  pose: PoseInfo | null;
+  bbox: [number, number, number, number] | null; // x1, y1, x2, y2 as fractions
+  usable: boolean;
+  reason: string | null;
+}
+
+export interface PoseImageResult {
+  filename: string;
+  status: 'ACCEPTED' | 'REJECTED';
+  poseId: number | null;
+  pose: PoseInfo | null;
+  error: string | null;
+}
+
+export interface PoseRegisterResponse {
+  status: 'REGISTERED' | 'POSES_ADDED';
+  profileId: number;
+  accepted: number;
+  rejected: number;
+  poseBuckets: string[];
+  images: PoseImageResult[];
+}
+
+export interface PoseMatch {
+  id: number;
+  faceName: string;
+  alias: string | null;
+  distance: number;
+  matchedPose: string;
+  matchedYaw: number | null;
+  matchedPitch: number | null;
+}
+
+export interface PoseSearchResponse {
+  status: 'MATCH' | 'NO_MATCH' | 'LOW_QUALITY' | 'ERROR';
+  queryHash: string;
+  queryPose: PoseInfo | null;
+  matches: PoseMatch[];
+  matchThreshold: number | null;
+  alertId: number | null;
+  error: string | null;
+}
+
 // ── Batch Search ─────────────────────────────────────────────────
 export interface BatchSearchMatch {
   id: number;

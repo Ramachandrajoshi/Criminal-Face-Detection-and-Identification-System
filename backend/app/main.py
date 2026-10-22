@@ -220,7 +220,7 @@ async def health_check():
     return HealthResponse(status="ok", database="connected")
 
 # ── Routers ──────────────────────────────────────────────────────
-from app.api.routes import register, search, alerts, audit, auth, liveness
+from app.api.routes import register, search, alerts, audit, auth, liveness, pose
 
 app.include_router(register.router)
 app.include_router(search.router)
@@ -228,6 +228,7 @@ app.include_router(alerts.router)
 app.include_router(audit.router)
 app.include_router(auth.router)
 app.include_router(liveness.router)
+app.include_router(pose.router)
 
 
 # ── OpenAPI security scheme (JWT Bearer) ─────────────────────────
