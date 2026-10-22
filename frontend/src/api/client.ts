@@ -8,6 +8,9 @@ import type {
   TokenResponse,
   FaceProfile,
   BatchSearchSseEvent,
+  PoseEstimateResponse,
+  PoseRegisterResponse,
+  PoseSearchResponse,
 } from '../types';
 
 // ── Token storage helpers ────────────────────────────────────────
@@ -311,6 +314,28 @@ export function registerFacesBatchStream(
 
   return () => controller.abort();
 }
+
+// ── Pose-aware enrollment & search ───────────────────────────────
+
+const MULTIPART = { headers: { 'Content-Type': 'multipart/form-data' } };
+
+/** Head pose of one frame — detection only, nothing stored or matched. */
+export const estimatePose = (frame: Blob): Promise<PoseEstimateResponse> => {
+  const fd = new FormData();
+  fd.append('file', frame, 'frame.jpg');
+  return api.post<PoseEstimateResponse>('/api/v1/pose/estimate', fd, MULTIPART).then((r) => r.data);
+};
+
+/** New profile from several photos at different head poses. */
+export const registerWithPoses = (formData: FormData): Promise<PoseRegisterResponse> =>
+  api.post<PoseRegisterResponse>('/api/v1/pose/register', formData, MULTIPART).then((r) => r.data);
+
+/** Add pose photos to an existing profile. */
+export const addFacePoses = (faceId: number, formData: FormData): Promise<PoseRegisterResponse> =>
+  api.post<PoseRegisterResponse>(`/api/v1/pose/faces/${faceId}/poses`, formData, MULTIPART).then((r) => r.data);
+
+export const poseSearch = (formData: FormData): Promise<PoseSearchResponse> =>
+  api.post<PoseSearchResponse>('/api/v1/pose/search', formData, MULTIPART).then((r) => r.data);
 
 // ── Alerts ───────────────────────────────────────────────────────
 
