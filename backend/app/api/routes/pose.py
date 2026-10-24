@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.routes.register import _validate_file
 from app.core.auth import get_current_user
 from app.core.config import INSIGHTFACE_EMBEDDING_VERSION, match_threshold_for_version, settings
+from app.core.debug_dump import dump_note, face_dump
 from app.core.inference_executor import run_inference
 from app.core.pose_pipeline import PoseEmbedding, embed_with_pose, estimate_frame_pose
 from app.db.models import FaceProfile as FaceProfileModel
@@ -84,11 +85,14 @@ async def _embed_upload(file: UploadFile) -> tuple[Optional[PoseEmbedding], Opti
     content, err = await _validate_file(file)
     if err:
         return None, err
-    try:
-        result = await run_inference(embed_with_pose, content)
-    except Exception as exc:  # noqa: BLE001 — engine failure, reported per file
-        logger.error("Pose embedding failed for %s: %s", file.filename, exc)
-        return None, "Embedding extraction failed"
+    # One debug dump folder per uploaded angle (no-op unless DEBUG_FACE_DUMP).
+    with face_dump("pose_enroll", content):
+        try:
+            result = await run_inference(embed_with_pose, content)
+        except Exception as exc:  # noqa: BLE001 — engine failure, reported per file
+            logger.error("Pose embedding failed for %s: %s", file.filename, exc)
+            dump_note("result", {"status": "ERROR", "error": str(exc)})
+            return None, "Embedding extraction failed"
     if result is None:
         return None, "No face detected in the uploaded image"
     if not result.accepted:
@@ -383,30 +387,39 @@ async def search_with_poses(
     query_pose: Optional[PoseInfo] = None
     matches: list[dict] = []
 
-    try:
-        result = await run_inference(embed_with_pose, content)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Pose embedding failed: %s", exc)
-        result, status, error = None, "ERROR", "Embedding extraction failed"
-    else:
-        if result is None:
-            status, error = "ERROR", "No face detected"
-        elif not result.accepted:
-            status, error = "LOW_QUALITY", result.rejected_reason
+    with face_dump("pose_search", content):
+        try:
+            result = await run_inference(embed_with_pose, content)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Pose embedding failed: %s", exc)
+            result, status, error = None, "ERROR", "Embedding extraction failed"
         else:
-            status, error = None, None
+            if result is None:
+                status, error = "ERROR", "No face detected"
+            elif not result.accepted:
+                status, error = "LOW_QUALITY", result.rejected_reason
+            else:
+                status, error = None, None
 
-    if result is not None:
-        query_pose = _pose_info(result)
+        if result is not None:
+            query_pose = _pose_info(result)
 
-    if status is None:
-        query_hash = compute_query_hash(result.embedding.tobytes())
-        matches = await pose_ann_query(
-            session, result.embedding, threshold=threshold, limit=limit, tenant_id=tenant_id
-        )
-        status = "MATCH" if matches else "NO_MATCH"
-    else:
-        query_hash = compute_query_hash(b"")
+        if status is None:
+            query_hash = compute_query_hash(result.embedding.tobytes())
+            matches = await pose_ann_query(
+                session, result.embedding, threshold=threshold, limit=limit, tenant_id=tenant_id
+            )
+            status = "MATCH" if matches else "NO_MATCH"
+        else:
+            query_hash = compute_query_hash(b"")
+        dump_note("result", {
+            "status": status, "error": error, "threshold": threshold,
+            "matches": [{"face_id": m["id"], "distance": m["distance"]} for m in matches],
+        })
+        if settings.debug_face_dump and result is not None and result.accepted:
+            # Nearest profiles ignoring the threshold, to see how far a miss was.
+            nearest = await pose_ann_query(session, result.embedding, threshold=2.0, limit=5, tenant_id=tenant_id)
+            dump_note("nearest_ignoring_threshold", [{"face_id": m["id"], "distance": m["distance"]} for m in nearest])
 
     best = matches[0] if matches else None
     audit_id = await add_audit_entry(

@@ -149,6 +149,15 @@ class Settings(BaseSettings):
     # consumes one inference-pool slot.
     batch_pipeline_concurrency: int = 3
 
+    # --- Debug: per-stage face dumps (app/core/debug_dump.py) ---
+    # Writes the face image after every pipeline stage, plus a manifest of
+    # lighting stats, to one folder per request under DEBUG_FACE_DUMP_DIR.
+    # DEBUG ONLY — this persists raw face images (AGENTS.md §15). Never enable
+    # it in production; delete the folder when done.
+    debug_face_dump: bool = False
+    # Relative paths resolve against the working directory (/app in Docker).
+    debug_face_dump_dir: str = "debug_faces"
+
     # CORS (allow frontend dev server)
     allowed_origins: list[str] = ["*"]
 

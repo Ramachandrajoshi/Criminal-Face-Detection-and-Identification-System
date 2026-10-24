@@ -150,6 +150,8 @@ Thumbs.db
 *.tmp
 *.temp
 testdata/
+# Debug face dumps (DEBUG_FACE_DUMP) — raw face images, never commit
+debug_faces/
 fetch_wanted_criminals.py
 test_images/
 

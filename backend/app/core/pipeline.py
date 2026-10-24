@@ -43,7 +43,8 @@ from app.core.config import (
     match_threshold_for_version,
     settings,
 )
-from app.core.inference_executor import get_executor
+from app.core.debug_dump import dump_detection, dump_note, dump_stage, face_dump
+from app.core.inference_executor import run_inference
 from app.db.vector_ops import compute_query_hash
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
 
     from deepface import DeepFace
 
+    attempts: list[dict] = []
     for backend in [settings.deepface_detector, "mtcnn", "opencv"]:
         try:
             faces = DeepFace.extract_faces(
@@ -118,27 +120,49 @@ def detect_face(image_bytes: bytes) -> Optional[np.ndarray]:
                     best.get("facial_area", {}).get("w", 0),
                     best.get("facial_area", {}).get("h", 0),
                 )
+                area = best.get("facial_area", {})
+                x, y = area.get("x", 0), area.get("y", 0)
+                eyes = [area[k] for k in ("left_eye", "right_eye") if area.get(k)]
+                attempts.append({"backend": backend, "faces": len(faces), "chosen": True})
+                dump_note("deepface_detect_attempts", attempts)
+                dump_detection(
+                    "dfc_01_detect", frame,
+                    (x, y, x + area.get("w", 0), y + area.get("h", 0)),
+                    landmarks=eyes or None,
+                    label=f"{backend} {best.get('confidence', 0):.2f}",
+                    backend=backend, confidence=best.get("confidence"),
+                )
+                dump_stage("dfc_02_crop", best["face"], rgb=True, backend=backend)
                 return best["face"]
 
             logger.debug(
                 "Backend %s found %d face(s) but all below confidence threshold %.2f — trying next",
                 backend, len(faces), _MIN_FACE_CONFIDENCE,
             )
+            attempts.append({
+                "backend": backend,
+                "faces": len(faces),
+                "confidences": [f.get("confidence") for f in faces],
+                "rejected": f"below {_MIN_FACE_CONFIDENCE}",
+            })
 
         except ValueError:
             # DeepFace raises ValueError("Face could not be detected ...") when
             # no face bounding box is found with enforce_detection=True.
             # This is the expected path for images without faces — not an error.
             logger.debug("No face bounding box found by detector '%s' — trying next", backend)
+            attempts.append({"backend": backend, "faces": 0})
         except Exception as exc:
             # Real driver / model failures (e.g. OOM, missing weights).
             logger.warning("Detector '%s' errored: %s — trying next backend", backend, exc)
+            attempts.append({"backend": backend, "error": str(exc)})
 
     logger.warning(
         "No face detected in image after trying all detector backends %s. "
         "Image will be marked as FAILED.",
         [settings.deepface_detector, "mtcnn", "opencv"],
     )
+    dump_note("deepface_detect_attempts", attempts)
     return None
 
 
@@ -207,6 +231,9 @@ def _preprocess_for_arcface(
     # At this point face is RGB uint8.
     # Convert to BGR once for OpenCV processing; we'll convert back at the end.
     face_bgr = cv2.cvtColor(face, cv2.COLOR_RGB2BGR)
+    # Debug dump names: v<recipe>_<step>_<name>; a gap means the step was off.
+    tag = f"v{version}"
+    dump_stage(f"{tag}_03_uint8", face_bgr)
 
     # ── Step 1: Upscale tiny crops ───────────────────────────────────────────
     # CCTV face crops can be as small as 50×50 px. Upscaling to at least
@@ -226,6 +253,7 @@ def _preprocess_for_arcface(
                 "Upscaled small crop from %dx%d → %dx%d (scale=%.2f)",
                 w, h, new_w, new_h, scale,
             )
+            dump_stage(f"{tag}_04_upscaled", face_bgr, scale=round(scale, 3))
 
     # ── Step 2: Denoising ────────────────────────────────────────────────────
     # Non-local means denoising removes CCTV sensor/compression noise before
@@ -240,6 +268,7 @@ def _preprocess_for_arcface(
             templateWindowSize=7,
             searchWindowSize=21,
         )
+        dump_stage(f"{tag}_05_denoised", face_bgr)
 
     # ── Step 3: Auto-gamma correction ────────────────────────────────────────
     # Computes a per-image gamma that maps the observed mean luminance toward
@@ -266,6 +295,7 @@ def _preprocess_for_arcface(
             logger.debug(
                 "Auto-gamma: mean_lum=%.1f → gamma=%.3f", mean_lum, gamma
             )
+            dump_stage(f"{tag}_06_gamma", face_bgr, input_mean_lum=round(mean_lum, 1), gamma=round(gamma, 3))
 
 
     # ── Step 4: CLAHE (LAB L* channel) ───────────────────────────────────────
@@ -281,12 +311,14 @@ def _preprocess_for_arcface(
         )
         face_lab[:, :, 0] = clahe.apply(face_lab[:, :, 0])
         face_bgr = cv2.cvtColor(face_lab, cv2.COLOR_LAB2BGR)
+        dump_stage(f"{tag}_07_clahe", face_bgr, clip_limit=settings.clahe_clip_limit)
 
     # ── Step 5: Unsharp mask ─────────────────────────────────────────────────
     if version >= 2 and settings.enable_unsharp_mask:
         blurred = cv2.GaussianBlur(face_bgr, (0, 0), sigmaX=2.0)
         s = float(settings.unsharp_strength)
         face_bgr = cv2.addWeighted(face_bgr, s, blurred, -(s - 1.0), 0)
+        dump_stage(f"{tag}_08_unsharp", face_bgr, strength=s)
 
     # ── Step 6: Pad → 112×112 Lanczos resize ─────────────────────────────────
     face = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
@@ -307,6 +339,7 @@ def _preprocess_for_arcface(
         )
         face = cv2.resize(face, (112, 112), interpolation=cv2.INTER_LANCZOS4)
 
+    dump_stage(f"{tag}_09_final_112", face, rgb=True)
     return face
 
 
@@ -386,11 +419,18 @@ def embed_with_insightface(image_bytes: bytes) -> Optional[np.ndarray]:
     faces = engine.detect(frame)
     if not faces:
         logger.debug("InsightFace: no face above det threshold")
+        dump_note("insightface_detect", "no face above det threshold")
         return None
 
     best = max(faces, key=lambda f: f.area)
     logger.debug("InsightFace: face score=%.2f area=%.0f", best.score, best.area)
-    return engine.embed(engine.align(frame, best.landmarks))
+    dump_detection(
+        "v4_01_detect", frame, best.bbox, best.landmarks,
+        label=f"scrfd {best.score:.2f}", score=best.score,
+    )
+    aligned = engine.align(frame, best.landmarks)
+    dump_stage("v4_02_aligned_112", aligned)
+    return engine.embed(aligned)
 
 
 class _NoFace:
@@ -408,20 +448,18 @@ async def _embed_versions(content: bytes, versions: list[int]) -> dict:
     detection pass; InsightFace runs its own detector. Both engines run
     concurrently on the inference pool.
     """
-    loop = asyncio.get_running_loop()
-    executor = get_executor()
     deepface_versions = [v for v in versions if v in DEEPFACE_EMBEDDING_VERSIONS]
 
     async def run_deepface() -> dict:
         if not deepface_versions:
             return {}
-        aligned = await loop.run_in_executor(executor, detect_face, content)
+        aligned = await run_inference(detect_face, content)
         if aligned is None:
             return {v: _NO_FACE for v in deepface_versions}
         # Independent work — run it on the inference pool concurrently rather
         # than serially, so wall-clock stays at roughly one embedding.
         embeddings = await asyncio.gather(
-            *(loop.run_in_executor(executor, extract_embedding, aligned, v) for v in deepface_versions)
+            *(run_inference(extract_embedding, aligned, v) for v in deepface_versions)
         )
         return dict(zip(deepface_versions, embeddings))
 
@@ -429,7 +467,7 @@ async def _embed_versions(content: bytes, versions: list[int]) -> dict:
         if INSIGHTFACE_EMBEDDING_VERSION not in versions:
             return {}
         try:
-            embedding = await loop.run_in_executor(executor, embed_with_insightface, content)
+            embedding = await run_inference(embed_with_insightface, content)
         except Exception as exc:  # noqa: BLE001 — engine failure, not "no face"
             logger.error("InsightFace embedding failed: %s", exc)
             return {INSIGHTFACE_EMBEDDING_VERSION: None}
@@ -447,6 +485,33 @@ async def _embed_for_enrollment(content: bytes) -> tuple[Optional[np.ndarray], O
     if result is None:
         return None, "Embedding extraction failed"
     return result, None
+
+
+# ---------- Debug face dump ----------
+def _dump_matches(matches: list[dict]) -> list[dict]:
+    """Match summary for the debug manifest — ids and distances, no names."""
+    return [
+        {"face_id": m["id"], "embedding_version": m.get("embedding_version"), "distance": m["distance"]}
+        for m in matches
+    ]
+
+
+async def _dump_nearest(session, embeddings: dict, tenant_id: int) -> None:
+    """
+    Debug dump only: record the 5 nearest vectors per recipe *ignoring* the
+    match threshold, so a NO_MATCH still shows how far the right person was.
+    """
+    from app.db.vector_ops import cosine_ann_query
+
+    nearest = {}
+    for v, emb in embeddings.items():
+        if emb is None:
+            continue
+        rows = await cosine_ann_query(
+            session, emb.tolist(), threshold=2.0, limit=5, tenant_id=tenant_id, target_version=v
+        )
+        nearest[f"v{v}"] = {"threshold": match_threshold_for_version(v), "nearest": _dump_matches(rows)}
+    dump_note("nearest_ignoring_threshold", nearest)
 
 
 # ---------- Stage 5: VERIFY (ANN query) ----------
@@ -563,12 +628,30 @@ async def run_pipeline(
       query_hash   — SHA-256 of the embedding (or empty-bytes hash on block)
     """
     content = await file.read()
-    loop = asyncio.get_running_loop()
-    executor = get_executor()
+    with face_dump("search", content) as dump:
+        result = await _search(content, session, gps_lat, gps_lon, limit, enforce_liveness, tenant_id)
+        if dump is not None:
+            dump.note("result", {
+                "status": result["status"],
+                "error": result.get("error"),
+                "matches": _dump_matches(result.get("matches", [])),
+            })
+    return result
 
+
+async def _search(
+    content: bytes,
+    session,
+    gps_lat: Optional[float],
+    gps_lon: Optional[float],
+    limit: int,
+    enforce_liveness: bool,
+    tenant_id: int,
+) -> dict:
+    """Body of ``run_pipeline`` once the upload has been read."""
     # ── Liveness gate (camera only) ───────────────────────────────
     if enforce_liveness:
-        is_live = await loop.run_in_executor(executor, check_liveness_on_bytes, content)
+        is_live = await run_inference(check_liveness_on_bytes, content)
         if not is_live:
             query_hash = compute_query_hash(b"")
             await _add_spoof_audit(session, query_hash, gps_lat=gps_lat, gps_lon=gps_lon, tenant_id=tenant_id)
@@ -602,6 +685,8 @@ async def run_pipeline(
     # An engine that found no face where another did is treated like a failed
     # extraction for its recipes: those vectors were not compared.
     embeddings = {v: (None if r is _NO_FACE else r) for v, r in results.items()}
+    if settings.debug_face_dump:
+        await _dump_nearest(session, {v: embeddings[v] for v in searchable}, tenant_id)
 
     # Prefer the current recipe's hash; fall back to the newest that succeeded
     # so a failed extraction still leaves a usable audit trail.
@@ -691,14 +776,17 @@ async def register_pipeline(
     """
     content = await file.read()
 
-    # Stages 1–4 under the current recipe (EMBEDDING_VERSION)
-    embedding, error = await _embed_for_enrollment(content)
-    if embedding is None:
-        return {"status": "ERROR", "error": error}
-
     from app.db.vector_ops import add_audit_entry, register_profile
 
-    profile_id = await register_profile(session, face_name, alias, demographics, embedding, tenant_id=tenant_id)
+    with face_dump("register", content):
+        # Stages 1–4 under the current recipe (EMBEDDING_VERSION)
+        embedding, error = await _embed_for_enrollment(content)
+        if embedding is None:
+            dump_note("result", {"status": "ERROR", "error": error})
+            return {"status": "ERROR", "error": error}
+
+        profile_id = await register_profile(session, face_name, alias, demographics, embedding, tenant_id=tenant_id)
+        dump_note("result", {"status": "REGISTERED", "face_id": profile_id})
 
     query_hash = compute_query_hash(embedding.tobytes())
     await add_audit_entry(
@@ -741,7 +829,9 @@ async def reenroll_pipeline(
     content = await file.read()
 
     # Stages 1–4 under the current recipe (EMBEDDING_VERSION)
-    embedding, error = await _embed_for_enrollment(content)
+    with face_dump(f"reenroll_face{face_id}", content):
+        embedding, error = await _embed_for_enrollment(content)
+        dump_note("result", {"status": "ERROR" if embedding is None else "OK", "error": error})
     if embedding is None:
         return {"status": "ERROR", "error": error}
 

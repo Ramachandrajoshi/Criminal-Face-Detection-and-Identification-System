@@ -19,6 +19,9 @@ def _ensure_test_env() -> None:
     os.environ["ADMIN_PASSWORD_HASH"] = hashed_password.decode("utf-8")
     os.environ["ADMIN_TEST_USERNAME"] = test_username
     os.environ["ADMIN_TEST_PASSWORD"] = test_password
+    # A developer's .env may enable debug face dumps; tests must never write
+    # into that folder, and the debug-only extra ANN queries would skew mocks.
+    os.environ["DEBUG_FACE_DUMP"] = "false"
 
 
 _ensure_test_env()

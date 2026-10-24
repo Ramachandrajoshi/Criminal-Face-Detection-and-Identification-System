@@ -15,6 +15,7 @@ from typing import Optional
 import numpy as np
 
 from app.core.config import settings
+from app.core.debug_dump import dump_detection, dump_note, dump_stage
 from app.core.pose import HeadPose, estimate_pose
 
 logger = logging.getLogger(__name__)
@@ -95,10 +96,19 @@ def embed_with_pose(image_bytes: bytes) -> Optional[PoseEmbedding]:
     engine = get_engine()
     faces = engine.detect(frame)
     if not faces:
+        dump_note("insightface_detect", "no face above det threshold")
         return None
 
     best = max(faces, key=lambda f: f.area)
     pose = estimate_pose(best.landmarks)
+    pose_meta = {
+        "yaw": round(pose.yaw, 1), "pitch": round(pose.pitch, 1),
+        "roll": round(pose.roll, 1), "bucket": pose.bucket,
+    }
+    dump_detection(
+        "pose_01_detect", frame, best.bbox, best.landmarks,
+        label=f"scrfd {best.score:.2f} {pose.bucket}", score=best.score, **pose_meta,
+    )
     logger.debug(
         "Pose: yaw=%.1f pitch=%.1f roll=%.1f bucket=%s score=%.2f",
         pose.yaw, pose.pitch, pose.roll, pose.bucket, best.score,
@@ -106,9 +116,12 @@ def embed_with_pose(image_bytes: bytes) -> Optional[PoseEmbedding]:
 
     reason = pose_rejection_reason(pose)
     if reason:
+        dump_note("pose_rejected", reason)
         return PoseEmbedding(None, pose, best.score, reason)
 
     # Alignment removes roll; yaw and pitch remain and are covered by
     # enrolling several poses per person.
-    embedding = engine.embed(engine.align(frame, best.landmarks))
+    aligned = engine.align(frame, best.landmarks)
+    dump_stage("pose_02_aligned_112", aligned, **pose_meta)
+    embedding = engine.embed(aligned)
     return PoseEmbedding(embedding, pose, best.score)
