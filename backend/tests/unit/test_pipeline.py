@@ -1448,6 +1448,7 @@ class TestConfigureGpu:
 
         mods, tf = self._fake_tf()
         with mods, patch("app.main.settings.enable_gpu", True), \
+             patch("app.main.settings.tf_enable_gpu", True), \
              patch("app.main.settings.tf_gpu_memory_limit_mb", 3072):
             _configure_gpu()
 
@@ -1460,11 +1461,25 @@ class TestConfigureGpu:
 
         mods, tf = self._fake_tf(n_gpus=2)
         with mods, patch("app.main.settings.enable_gpu", True), \
+             patch("app.main.settings.tf_enable_gpu", True), \
              patch("app.main.settings.tf_gpu_memory_limit_mb", 0):
             _configure_gpu()
 
         assert tf.config.experimental.set_memory_growth.call_count == 2
         tf.config.set_logical_device_configuration.assert_not_called()
+
+    def test_tf_gpu_disabled_hides_gpu_from_tensorflow_only(self):
+        from app.main import _configure_gpu
+
+        mods, tf = self._fake_tf()
+        with mods, patch("app.main.settings.enable_gpu", True), \
+             patch("app.main.settings.tf_enable_gpu", False), \
+             patch("app.main.settings.tf_gpu_memory_limit_mb", 3072):
+            _configure_gpu()
+
+        tf.config.set_visible_devices.assert_called_once_with([], "GPU")
+        tf.config.set_logical_device_configuration.assert_not_called()
+        tf.config.experimental.set_memory_growth.assert_not_called()
 
     def test_gpu_disabled_never_touches_tensorflow(self):
         from app.main import _configure_gpu
