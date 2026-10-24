@@ -151,3 +151,65 @@ async def test_pose_ann_query_is_one_statement_grouped_per_face():
         "id": 5, "face_name": "Jane", "alias": None, "distance": 0.21,
         "matched_pose": "left_3q", "matched_yaw": -31.0, "matched_pitch": 2.0, "tenant_id": 7,
     }]
+
+
+def _engine_with(face, embedding=None):
+    engine = MagicMock()
+    engine.detect_primary.return_value = (face, "none" if face is None else "standard")
+    engine.align.return_value = np.zeros((112, 112, 3), np.uint8)
+    engine.embed.return_value = embedding
+    return engine
+
+
+def _png(h=480, w=640):
+    import cv2
+
+    return cv2.imencode(".png", np.zeros((h, w, 3), np.uint8))[1].tobytes()
+
+
+def test_frame_pose_normalises_and_clips_the_box(monkeypatch):
+    from app.core import face_engine, pose_pipeline
+    from app.core.face_engine import DetectedFace
+
+    engine = _engine_with(DetectedFace(np.array([-32.0, 48, 320, 528]), 0.88, _project(yaw=5)))
+    monkeypatch.setattr(face_engine, "get_engine", lambda: engine)
+
+    estimate = pose_pipeline.estimate_frame_pose(_png())
+
+    assert estimate.bbox == (0.0, 0.1, 0.5, 1.0)       # x1 < 0 and y2 > height are clipped
+    assert estimate.quality == 0.88 and estimate.rejected_reason is None
+    assert abs(estimate.pose.yaw - 5) < 1
+    assert engine.detect_primary.call_args.kwargs["prefer_center"] is True   # picks like enrollment
+
+
+@pytest.mark.parametrize("image, face", [(b"not an image", None), ("blank", None)])
+def test_frame_pose_without_a_face_is_none(monkeypatch, image, face):
+    from app.core import face_engine, pose_pipeline
+
+    monkeypatch.setattr(face_engine, "get_engine", lambda: _engine_with(face))
+    assert pose_pipeline.estimate_frame_pose(_png() if image == "blank" else image) is None
+
+
+@pytest.mark.parametrize("image", [b"not an image", "blank"])
+def test_embed_with_pose_without_a_face_is_none(monkeypatch, image):
+    from app.core import face_engine, pose_pipeline
+
+    engine = _engine_with(None)
+    monkeypatch.setattr(face_engine, "get_engine", lambda: engine)
+    assert pose_pipeline.embed_with_pose(_png() if image == "blank" else image) is None
+    engine.embed.assert_not_called()
+
+
+def test_embed_with_pose_embeds_an_accepted_pose(monkeypatch):
+    from app.core import face_engine, pose_pipeline
+    from app.core.face_engine import DetectedFace
+
+    embedding = np.full(512, 1 / np.sqrt(512), np.float32)
+    engine = _engine_with(DetectedFace(np.array([100.0, 100, 300, 300]), 0.93, _project(yaw=-30)), embedding)
+    monkeypatch.setattr(face_engine, "get_engine", lambda: engine)
+
+    result = pose_pipeline.embed_with_pose(_png(), enrollment=True)
+
+    assert result.accepted and result.embedding is embedding
+    assert result.pose.bucket == pose_bucket(result.pose.yaw, result.pose.pitch)
+    assert engine.detect_primary.call_args.kwargs["prefer_center"] is True

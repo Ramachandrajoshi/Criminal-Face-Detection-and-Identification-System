@@ -3,7 +3,9 @@ Test JWT authentication — create token, decode, expiry, invalid tokens.
 """
 
 import io
+import os
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 from PIL import Image
@@ -173,3 +175,63 @@ class TestAuthMiddleware:
             headers={"Authorization": "Token abc123"},
         )
         assert response.status_code == 401
+
+
+class TestLoginConfiguration:
+    """POST /login when the admin credentials are missing or malformed."""
+
+    @pytest.fixture
+    def client(self):
+        return TestClient(__import__("app.main", fromlist=["app"]).app, raise_server_exceptions=False)
+
+    def _login(self, client, username=None, password="whatever"):
+        return client.post("/api/v1/login", json={"username": username or settings.admin_username,
+                                                  "password": password})
+
+    def test_unconfigured_admin_cannot_log_in(self, client):
+        with patch.object(settings, "admin_password_hash", ""):
+            assert self._login(client).status_code == 401
+
+    def test_shell_mangled_hash_is_reported_as_misconfiguration(self, client):
+        # "$2b$12$..." unquoted in .env loses its "$2b"/"$12" parts to the shell.
+        with patch.object(settings, "admin_password_hash", "$.abcdefghijklmnopqrstuv"):
+            response = self._login(client)
+        assert response.status_code == 500
+        assert "ADMIN_PASSWORD_HASH is invalid" in response.json()["detail"]
+
+    def test_unreadable_hash_is_reported_as_misconfiguration(self, client):
+        with patch.object(settings, "admin_password_hash", "$2b$12$" + "!" * 53):
+            response = self._login(client)
+        assert response.status_code == 500
+        assert "bcrypt could not validate" in response.json()["detail"]
+
+    def test_valid_credentials_issue_a_token(self, client):
+        response = self._login(client, password=os.environ["ADMIN_TEST_PASSWORD"])
+        assert response.status_code == 200
+        body = response.json()
+        assert decode_access_token(body["access_token"])["sub"] == settings.admin_username
+        assert body["expires_in"] == settings.jwt_expiry_hours * 3600
+
+
+class TestAdminInit:
+    @pytest.fixture
+    def client(self):
+        return TestClient(__import__("app.main", fromlist=["app"]).app, raise_server_exceptions=False)
+
+    def _post(self, client):
+        token = create_access_token({"sub": "admin", "role": "admin"})
+        return client.post("/api/v1/admin/init", headers={"Authorization": f"Bearer {token}"})
+
+    def test_disabled_by_default(self, client):
+        with patch.object(settings, "allow_admin_init", False):
+            assert self._post(client).status_code == 403
+
+    def test_requires_a_configured_username(self, client):
+        with patch.object(settings, "allow_admin_init", True), patch.object(settings, "admin_username", ""):
+            assert self._post(client).status_code == 400
+
+    def test_enabled_returns_hint_without_the_hash(self, client):
+        with patch.object(settings, "allow_admin_init", True):
+            body = self._post(client).json()
+        assert body["username"] == settings.admin_username and body["password_hash_hint"] == "bcrypt"
+        assert settings.admin_password_hash not in str(body)
