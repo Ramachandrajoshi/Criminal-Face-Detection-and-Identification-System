@@ -78,7 +78,7 @@ Authorization: Bearer <token>
   "status": "MATCH",
   "query_hash": "a1b2c3d4...",
   "matches": [
-    { "id": 42, "suspectName": "John Doe", "alias": "JD", "distance": 0.32 }
+    { "id": 42, "faceName": "John Doe", "alias": "JD", "distance": 0.32 }
   ],
   "gpsLat": 40.7128,
   "gpsLon": -74.006,

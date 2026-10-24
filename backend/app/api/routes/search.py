@@ -273,6 +273,8 @@ async def _process_search_file(
         matches_out = [
             {
                 "id": m["id"],
+                "faceName": m.get("face_name", m.get("person_name")),
+                # Pre-rename key, kept for clients built against it.
                 "suspectName": m.get("face_name", m.get("person_name")),
                 "alias": m.get("alias"),
                 "distance": m["distance"],

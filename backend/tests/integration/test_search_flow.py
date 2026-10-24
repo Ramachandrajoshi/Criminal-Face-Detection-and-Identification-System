@@ -311,3 +311,34 @@ class TestSearchFlow:
             headers=auth_headers,
         )
         assert response.status_code == 422
+
+    def test_batch_stream_match_carries_face_name(self, client, auth_headers):
+        """Batch SSE matches carry /search's ``faceName`` key (the UI renders it) and the old ``suspectName``."""
+        import json
+
+        img = Image.new("RGB", (224, 224), color="red")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        result = {
+            "status": "MATCH", "query_hash": "abc", "alert_id": 7, "error": None,
+            "matches": [{
+                "id": 3, "face_name": "Jane Doe", "alias": None, "distance": 0.37,
+                "embedding_version": 4, "tenant_id": 1,
+            }],
+        }
+
+        with patch("app.api.routes.search._search_one", AsyncMock(return_value=result)):
+            response = client.post(
+                "/api/v1/search/batch/stream",
+                files=[("files", ("query.jpg", buf.getvalue(), "image/jpeg"))],
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines() if line.startswith("data: ")
+        ]
+        match = next(e for e in events if e["type"] == "progress")["matches"][0]
+        assert match["faceName"] == "Jane Doe"
+        assert match["suspectName"] == "Jane Doe"
