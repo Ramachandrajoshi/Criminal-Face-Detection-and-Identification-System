@@ -29,8 +29,12 @@ from typing import AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
 from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import Headers
+from starlette.routing import Match
+from starlette.types import Scope
 
 from app.core.auth import get_current_user
 from app.core.config import settings
@@ -39,7 +43,13 @@ from app.core.validation import validate_image_dimensions
 from app.db.models import FaceProfile as FaceProfileModel
 from app.db.session import async_session_factory, get_session
 from app.db.vector_ops import add_audit_entry, compute_query_hash
-from app.schemas.face import ReenrollResponse, RegisterResponse, SuspectProfileOut, SuspectUpdateIn
+from app.schemas.face import (
+    ReenrollResponse,
+    RegisterResponse,
+    SuspectProfileOut,
+    SuspectUpdateIn,
+    SuspectUpdateJsonIn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -502,6 +512,48 @@ async def get_face(
         created_at=row.created_at.isoformat() if row.created_at else "",
         tenant_id=row.tenant_id,
     )
+
+
+class _JSONBodyRoute(APIRoute):
+    """
+    Matches only requests with a JSON body, so a JSON handler can share a
+    path and method with a form-based one registered after it: JSON requests
+    stop here, every other request falls through to the next route unchanged.
+    """
+
+    def matches(self, scope: Scope) -> tuple[Match, Scope]:
+        match, child_scope = super().matches(scope)
+        content_type = Headers(scope=scope).get("content-type", "").split(";")[0].strip().lower()
+        if match is not Match.NONE and content_type != "application/json":
+            return Match.NONE, {}
+        return match, child_scope
+
+
+async def update_face_json(
+    face_id: int,
+    body: SuspectUpdateJsonIn,
+    tenant_id: int = Query(1, ge=1, description="Tenant identifier (default: 1)"),
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+):
+    """
+    JSON variant of ``update_face`` (snake_case or camelCase keys, tenant_id in
+    the query string like ``GET /faces/{face_id}``). The form-based route below
+    is kept unchanged for existing clients until they migrate to JSON.
+    """
+    return await update_face(face_id=face_id, body=body, tenant_id=tenant_id, session=session, _user=_user)
+
+
+# Registered ahead of update_face so JSON requests are matched first; hidden
+# from OpenAPI, which holds one PATCH per path (the docs keep the form route).
+router.add_api_route(
+    "/faces/{face_id}",
+    update_face_json,
+    methods=["PATCH"],
+    response_model=SuspectProfileOut,
+    route_class_override=_JSONBodyRoute,
+    include_in_schema=False,
+)
 
 
 @router.patch("/faces/{face_id}", response_model=SuspectProfileOut)

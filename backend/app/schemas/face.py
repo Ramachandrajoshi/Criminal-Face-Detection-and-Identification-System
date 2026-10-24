@@ -127,4 +127,9 @@ class SuspectUpdateIn(BaseModel):
     tenant_id: Optional[int] = None
 
 
+class SuspectUpdateJsonIn(SuspectUpdateIn):
+    """JSON body for PATCH /faces/{id}: accepts snake_case or camelCase keys."""
+    model_config = _BaseCamel.model_config
+
+
 
