@@ -67,6 +67,17 @@ def _configure_gpu() -> None:
         short_names = [g.name.replace("/physical_device:", "") for g in gpus]
 
         # Must be configured before any TF op runs.
+        if not settings.tf_enable_gpu:
+            # Hides the GPU from TensorFlow only — ONNX Runtime (InsightFace)
+            # creates its own CUDA context and still uses it.
+            tf.config.set_visible_devices([], "GPU")
+            logger.info(
+                "TensorFlow GPU disabled via TF_ENABLE_GPU=false — DeepFace runs on CPU; "
+                "InsightFace still uses %s",
+                short_names,
+            )
+            return
+
         limit_mb = settings.tf_gpu_memory_limit_mb
         if limit_mb > 0:
             for gpu in gpus:

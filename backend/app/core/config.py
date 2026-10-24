@@ -134,6 +134,12 @@ class Settings(BaseSettings):
     # Set ENABLE_GPU=false in .env to force CPU-only mode (e.g. on machines
     # without a CUDA-capable GPU or NVIDIA Container Toolkit).
     enable_gpu: bool = True
+    # Let TensorFlow (DeepFace: recipes 1–3, detector warm-up) use the GPU.
+    # Set false when the image's TensorFlow cannot run on the card — TF 2.16
+    # (CUDA 12.3 / cuDNN 8.9) fails on RTX 50-series / Blackwell GPUs (compute
+    # capability 12.0) with CUDA_ERROR_INVALID_HANDLE. DeepFace then runs on
+    # CPU while ONNX Runtime (InsightFace: version 4 and /pose) keeps the GPU.
+    tf_enable_gpu: bool = True
     # Hard VRAM cap for TensorFlow (DeepFace models), in MB. 0 = no cap
     # (memory growth). The InsightFace engine is capped separately by
     # INSIGHTFACE_GPU_MEM_LIMIT_MB; both share one CUDA context (~0.3–0.5 GB).
