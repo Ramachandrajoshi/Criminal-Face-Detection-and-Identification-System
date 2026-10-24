@@ -14,6 +14,7 @@ a single tunable (``INFERENCE_POOL_SIZE``) instead of an implicit default.
 """
 
 import asyncio
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Callable, TypeVar
@@ -34,9 +35,13 @@ def get_executor() -> ThreadPoolExecutor:
 
 
 async def run_inference(fn: Callable[..., T], *args, **kwargs) -> T:
-    """Run a blocking callable on the shared inference pool and await its result."""
+    """
+    Run a blocking callable on the shared inference pool and await its result.
+
+    Context variables are copied into the worker thread, as ``asyncio.to_thread``
+    does — ``run_in_executor`` alone drops them. The per-request debug face
+    dump (app/core/debug_dump.py) relies on this.
+    """
     loop = asyncio.get_running_loop()
-    bound = partial(fn, *args, **kwargs) if kwargs else fn
-    if kwargs:
-        return await loop.run_in_executor(_executor, bound)
-    return await loop.run_in_executor(_executor, fn, *args)
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(_executor, partial(ctx.run, fn, *args, **kwargs))

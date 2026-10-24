@@ -69,6 +69,10 @@ services:
       - ./db:/app/db:ro
       # InsightFace weights (EMBEDDING_VERSION=4), downloaded on first use.
       - insightface_models:/root/.insightface
+      # Debug face dumps (DEBUG_FACE_DUMP=true): one folder per request with
+      # the face after every pipeline stage. Inspect them on the host under
+      # ./debug_faces. Stays empty while the flag is off.
+      - ./debug_faces:/app/debug_faces
 
   frontend:
     build:
