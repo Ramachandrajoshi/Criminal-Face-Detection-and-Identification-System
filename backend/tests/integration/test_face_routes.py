@@ -247,6 +247,18 @@ class TestFaceCrud:
         assert audit.await_args.kwargs["result_name"] is None   # no PII in the audit log
         db_session.commit.assert_awaited_once()
 
+    @pytest.mark.parametrize("form, tenant", [(None, 1), ({"tenant_id": "2"}, 2)])
+    def test_delete_is_audited_under_the_faces_tenant(self, client, auth_headers, db_session, form, tenant):
+        db_session.execute.return_value = _result(one_or_none=_profile_row())
+
+        with patch("app.api.routes.register.add_audit_entry", AsyncMock()) as audit:
+            response = client.request("DELETE", "/api/v1/faces/6", data=form, headers=auth_headers)
+
+        assert response.status_code == 204
+        assert audit.await_args.kwargs["tenant_id"] == tenant
+        delete = db_session.execute.await_args_list[-1].args[0]
+        assert delete.compile().params == {"id_1": 6, "tenant_id_1": tenant}
+
     def test_delete_missing_face_is_404(self, client, auth_headers, db_session):
         db_session.execute.return_value = _result(one_or_none=None)
         with patch("app.api.routes.register.add_audit_entry", AsyncMock()) as audit:
