@@ -6,6 +6,8 @@ Tests that only validate auth and input validation pass without a DB.
 """
 
 import io
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -88,6 +90,7 @@ class TestAuditLog:
         )
         assert response.status_code in (200, 500)
 
+    @pytest.mark.usefixtures("db_session")
     def test_audit_invalid_page(self, client, auth_headers):
         """Page < 1 should return 422."""
         response = client.get(
@@ -97,6 +100,7 @@ class TestAuditLog:
         )
         assert response.status_code == 422
 
+    @pytest.mark.usefixtures("db_session")
     def test_audit_invalid_page_size(self, client, auth_headers):
         """page_size > 200 should return 422."""
         response = client.get(
@@ -155,3 +159,30 @@ class TestAuditResponseSchema:
                 timestamp="2026-05-24T12:00:00+00:00",
             )
             assert entry.event_type == event_type
+
+
+class TestAuditWithSession:
+    """GET /audit with the database mocked."""
+
+    def test_lists_entries_with_event_filter(self, client, auth_headers, db_session):
+        stamp = datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)
+        result = MagicMock()
+        result.fetchall.return_value = [(1, "MATCH", "h" * 64, "Jane Doe", 0.3, 12.9, 77.5, stamp, 3)]
+        db_session.execute.return_value = result
+
+        response = client.get("/api/v1/audit", params={"event_type": "MATCH", "page": 2, "page_size": 10,
+                                                       "tenant_id": 3}, headers=auth_headers)
+
+        assert response.status_code == 200
+        entry = response.json()[0]
+        assert (entry["eventType"], entry["resultName"], entry["tenantId"]) == ("MATCH", "Jane Doe", 3)
+        assert entry["timestamp"].startswith("2026-10-24")
+        sql, params = db_session.execute.await_args.args
+        assert params == {"limit": 10, "offset": 10, "tenant_id": 3, "event_type": "MATCH"}
+        assert "event_type = :event_type" in str(sql)
+
+    def test_non_admin_is_forbidden(self, client, db_session):
+        token = create_access_token({"sub": "viewer", "role": "viewer"})
+        response = client.get("/api/v1/audit", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 403
+        db_session.execute.assert_not_awaited()

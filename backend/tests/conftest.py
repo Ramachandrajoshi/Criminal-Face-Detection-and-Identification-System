@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import bcrypt
+import pytest
 
 
 def _ensure_test_env() -> None:
@@ -31,3 +32,26 @@ _ensure_test_env()
 _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
+
+
+@pytest.fixture
+def db_session():
+    """
+    An AsyncMock in place of the database session for every route.
+
+    FastAPI opens the session (a dependency) before it validates query and
+    form fields, so without this even a 422 test needs a reachable database.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from app.db.session import get_session
+    from app.main import app
+
+    session = AsyncMock()
+    session.add = lambda obj: None   # Session.add is synchronous
+
+    async def override():
+        yield session
+
+    with patch.dict(app.dependency_overrides, {get_session: override}):
+        yield session

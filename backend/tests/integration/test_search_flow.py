@@ -9,6 +9,8 @@ Tests:
 """
 
 import io
+import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
@@ -282,6 +284,7 @@ class TestSearchFlow:
         )
         assert response.status_code in (200, 400, 500)
 
+    @pytest.mark.usefixtures("db_session")
     def test_search_invalid_limit(self, client, auth_headers):
         """Limit < 1 should return 422."""
         img = Image.new("RGB", (224, 224), color="red")
@@ -297,6 +300,7 @@ class TestSearchFlow:
         )
         assert response.status_code == 422
 
+    @pytest.mark.usefixtures("db_session")
     def test_search_limit_too_high(self, client, auth_headers):
         """Limit > 50 should return 422."""
         img = Image.new("RGB", (224, 224), color="red")
@@ -342,3 +346,96 @@ class TestSearchFlow:
         match = next(e for e in events if e["type"] == "progress")["matches"][0]
         assert match["faceName"] == "Jane Doe"
         assert match["suspectName"] == "Jane Doe"
+
+
+def _jpeg(size: int = 112) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), color="red").save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _per_file_sessions(session):
+    """Stand-in for async_session_factory: every batch file gets ``session``."""
+    @asynccontextmanager
+    async def factory():
+        yield session
+    return factory
+
+
+_OVERSIZED = _jpeg() + b"\0" * (5 * 1024 * 1024)
+MATCH = {
+    "status": "MATCH", "query_hash": "q" * 64,
+    "matches": [{"id": 3, "face_name": "Jane Doe", "alias": None, "distance": 0.37,
+                 "embedding_version": 4, "tenant_id": 1}],
+}
+
+
+class TestSearchValidation:
+    @pytest.mark.parametrize("upload, detail", [
+        (("q.gif", b"GIF89a", "image/gif"), "Only JPEG/PNG"),
+        (("q.jpg", _OVERSIZED, "image/jpeg"), "5 MB"),
+        (("q.jpg", _jpeg(size=32), "image/jpeg"), "at least 64x64"),
+    ])
+    def test_invalid_upload_is_rejected(self, client, auth_headers, db_session, upload, detail):
+        response = client.post("/api/v1/search", files={"file": upload}, headers=auth_headers)
+        assert response.status_code == 400
+        assert detail in response.json()["detail"]
+
+
+class TestBatchSearch:
+    def _stream(self, client, auth_headers, files, run_pipeline, session=None):
+        session = session or AsyncMock()
+        with patch("app.api.routes.search.run_pipeline", run_pipeline), \
+             patch("app.api.routes.search.async_session_factory", _per_file_sessions(session)), \
+             patch("app.api.routes.search.add_audit_entry", AsyncMock(return_value=42)) as audit, \
+             patch("app.api.routes.search.create_alert", AsyncMock(return_value=43)) as alert:
+            response = client.post("/api/v1/search/batch/stream", files=[("files", f) for f in files],
+                                   headers=auth_headers)
+        events = [json.loads(line.removeprefix("data: "))
+                  for line in response.text.splitlines() if line.startswith("data: ")]
+        return response, events, audit, alert
+
+    def test_counts_matches_misses_and_errors(self, client, auth_headers):
+        async def run_pipeline(file, session, **kwargs):
+            if file.filename == "hit.jpg":
+                return MATCH
+            return {"status": "NO_MATCH", "query_hash": "n" * 64, "matches": []}
+
+        files = [("hit.jpg", _jpeg(), "image/jpeg"), ("miss.jpg", _jpeg(), "image/jpeg"),
+                 ("q.gif", b"GIF89a", "image/gif"), ("big.jpg", _OVERSIZED, "image/jpeg"),
+                 ("tiny.jpg", _jpeg(size=32), "image/jpeg")]
+        response, events, audit, alert = self._stream(client, auth_headers, files, run_pipeline)
+
+        assert response.status_code == 200
+        progress = {e["filename"]: e for e in events if e["type"] == "progress"}
+        assert progress["hit.jpg"]["alertId"] == 43
+        assert progress["miss.jpg"]["status"] == "NO_MATCH" and progress["miss.jpg"]["alertId"] is None
+        assert "Unsupported MIME type" in progress["q.gif"]["error"]
+        assert progress["big.jpg"]["error"] == "Image exceeds 5 MB limit"
+        assert "at least 64x64" in progress["tiny.jpg"]["error"]
+        done = events[-1]
+        assert (done["matched"], done["noMatch"], done["errors"]) == (1, 1, 3)
+        assert audit.await_count == 2                  # one per searched file
+        assert alert.await_args.kwargs["face_id"] == 3
+
+    def test_spoof_blocked_is_not_audited_twice(self, client, auth_headers):
+        pipeline = AsyncMock(return_value={"status": "SPOOF_BLOCKED", "query_hash": "s" * 64, "matches": []})
+        _, events, audit, alert = self._stream(client, auth_headers, [("a.jpg", _jpeg(), "image/jpeg")], pipeline)
+        assert events[1]["status"] == "SPOOF_BLOCKED"
+        audit.assert_not_awaited()                     # run_pipeline already logged it
+        alert.assert_not_awaited()
+
+    def test_pipeline_exception_is_reported_per_file(self, client, auth_headers):
+        session = AsyncMock()
+        session.rollback.side_effect = RuntimeError("connection already gone")  # swallowed
+        pipeline = AsyncMock(side_effect=RuntimeError("db down"))
+        _, events, _, _ = self._stream(client, auth_headers, [("a.jpg", _jpeg(), "image/jpeg")], pipeline, session)
+        assert (events[1]["status"], events[1]["error"]) == ("ERROR", "db down")
+        assert events[-1]["errors"] == 1
+        session.rollback.assert_awaited_once()
+
+    def test_rejects_more_than_20_files(self, client, auth_headers):
+        files = [(f"{i}.jpg", b"x", "image/jpeg") for i in range(21)]
+        response, _, _, _ = self._stream(client, auth_headers, files, AsyncMock())
+        assert response.status_code == 400
+        assert "20 images" in response.json()["detail"]
