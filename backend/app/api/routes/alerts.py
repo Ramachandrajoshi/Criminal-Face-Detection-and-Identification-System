@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.exc import InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,7 +132,9 @@ async def list_alerts(
 async def confirm_alert(
     alert_id: int,
     confirm_data: ConfirmRequest,
-    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
+    # A query parameter, as on GET /alerts: a form field here would make
+    # FastAPI expect a form body and reject the JSON ``confirm_data``.
+    tenant_id: int = Query(1, ge=1, description="Tenant identifier (default: 1)"),
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
 ):
