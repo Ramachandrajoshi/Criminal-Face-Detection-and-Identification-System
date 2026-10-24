@@ -115,9 +115,9 @@ def test_embed_with_pose_skips_embedding_for_rejected_pose(monkeypatch):
     from app.core.face_engine import DetectedFace
 
     engine = MagicMock()
-    engine.detect.return_value = [
-        DetectedFace(np.array([0, 0, 100, 100.0]), 0.9, _project(yaw=88)),
-    ]
+    engine.detect_primary.return_value = (
+        DetectedFace(np.array([0, 0, 100, 100.0]), 0.9, _project(yaw=88)), "standard",
+    )
     monkeypatch.setattr(face_engine, "get_engine", lambda: engine)
     _, buf = cv2.imencode(".png", np.zeros((64, 64, 3), np.uint8))
 

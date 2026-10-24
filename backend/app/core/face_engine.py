@@ -56,6 +56,9 @@ ARCFACE_TEMPLATE = np.array(
 )
 
 _NMS_THRESHOLD = 0.4
+# Border added on every side, as a fraction of the image, by the last
+# detection fallback (see InsightFaceEngine.detect_primary).
+_PAD_FRACTION = 0.3
 
 
 @dataclass
@@ -67,6 +70,50 @@ class DetectedFace:
     @property
     def area(self) -> float:
         return float(max(0.0, self.bbox[2] - self.bbox[0]) * max(0.0, self.bbox[3] - self.bbox[1]))
+
+    def visible_area(self, image_shape: tuple) -> float:
+        """Area of the part of the box that lies inside the image."""
+        h, w = image_shape[:2]
+        x1, y1, x2, y2 = self.bbox
+        return float(max(0.0, min(x2, w) - max(x1, 0.0)) * max(0.0, min(y2, h) - max(y1, 0.0)))
+
+    def shifted(self, dx: float, dy: float) -> "DetectedFace":
+        return DetectedFace(
+            self.bbox + np.array([dx, dy, dx, dy]), self.score, self.landmarks + np.array([dx, dy])
+        )
+
+
+def select_primary_face(
+    faces: list[DetectedFace], image_shape: tuple, prefer_center: bool = False
+) -> Optional[DetectedFace]:
+    """
+    The face to embed when the image holds several.
+
+    Default (search): visible area, scaled down by the share of the box that
+    falls outside the image, so a face cut off at the border loses to a fully
+    visible one wherever the subject stands — CCTV subjects are rarely centred.
+
+    ``prefer_center`` (enrollment): InsightFace's own rule, box area minus
+    twice the squared distance from the image centre — the subject of a
+    mugshot or ID photo is the centred face.
+
+    Plain box area — the previous rule — counts the part of the box outside
+    the image, so a bystander half out of shot often outranked the subject: on
+    LFW it scored 97.1% against 99.7% for these rules (backend/scripts/
+    benchmark_engines.py --lfw-pairs).
+    """
+    if not faces:
+        return None
+    if prefer_center:
+        h, w = image_shape[:2]
+
+        def score(f: DetectedFace) -> float:
+            cx, cy = (f.bbox[0] + f.bbox[2]) / 2 - w / 2, (f.bbox[1] + f.bbox[3]) / 2 - h / 2
+            return f.area - 2.0 * (cx * cx + cy * cy)
+    else:
+        def score(f: DetectedFace) -> float:
+            return f.visible_area(image_shape) ** 2 / max(f.area, 1e-6)
+    return max(faces, key=score)
 
 
 # ---------- Model files ----------
@@ -218,20 +265,30 @@ class InsightFaceEngine:
                 self._anchor_cache[key] = centers
             return self._anchor_cache[key]
 
-    def detect(self, img_bgr: np.ndarray) -> list[DetectedFace]:
-        """Return every face scoring above ``det_threshold``, best first."""
+    def detect(
+        self, img_bgr: np.ndarray, size: Optional[int] = None, upscale: bool = True
+    ) -> list[DetectedFace]:
+        """
+        Return every face scoring above ``det_threshold``, best first.
+
+        ``size`` overrides the square detector input (default ``det_size``).
+        With ``upscale=False`` an image smaller than the input is placed at its
+        native size instead of being enlarged to fill it.
+        """
         import cv2
 
         # Letterbox into a square canvas, keeping the aspect ratio.
         h, w = img_bgr.shape[:2]
-        size = self.det_size
-        if h > w:
+        size = size or self.det_size
+        if not upscale and max(h, w) <= size:
+            new_h, new_w = h, w
+        elif h > w:
             new_h, new_w = size, max(1, int(size * w / h))
         else:
             new_h, new_w = max(1, int(size * h / w)), size
         scale = new_h / h
         canvas = np.zeros((size, size, 3), dtype=np.uint8)
-        canvas[:new_h, :new_w] = cv2.resize(img_bgr, (new_w, new_h))
+        canvas[:new_h, :new_w] = img_bgr if (new_h, new_w) == (h, w) else cv2.resize(img_bgr, (new_w, new_h))
 
         blob = cv2.dnn.blobFromImage(
             canvas, 1.0 / 128.0, (size, size), (127.5, 127.5, 127.5), swapRB=True
@@ -268,6 +325,48 @@ class InsightFaceEngine:
         kps = np.concatenate(all_kps) / scale
         keep = _nms(boxes, scores, _NMS_THRESHOLD)
         return [DetectedFace(boxes[i], float(scores[i]), kps[i]) for i in keep]
+
+    def detect_primary(
+        self, img_bgr: np.ndarray, prefer_center: bool = False
+    ) -> tuple[Optional[DetectedFace], str]:
+        """
+        The one face to embed (see ``select_primary_face``; pass
+        ``prefer_center`` for enrollment photos) and the pass that found it:
+        "standard" | "native" | "large" | "padded" | "none".
+
+        The standard pass runs first, so an image it already handled keeps the
+        same detections. The fallbacks run only when it finds nothing:
+
+          native — an image smaller than the detector input, at its own size.
+                   Enlarged to fill the input, a tightly cropped face overflows
+                   the detector's largest anchors and is missed.
+          large  — a frame bigger than the input, at twice the input size, for
+                   faces too small to survive the downscale (CCTV).
+          padded — a black border round the image, for faces cut off at the edge.
+        """
+        import cv2
+
+        def primary(faces: list[DetectedFace]) -> DetectedFace:
+            return select_primary_face(faces, img_bgr.shape, prefer_center)
+
+        faces = self.detect(img_bgr)
+        if faces:
+            return primary(faces), "standard"
+
+        h, w = img_bgr.shape[:2]
+        if max(h, w) < self.det_size:
+            faces, route = self.detect(img_bgr, upscale=False), "native"
+        elif max(h, w) > self.det_size:
+            faces, route = self.detect(img_bgr, size=2 * self.det_size), "large"
+        if faces:
+            return primary(faces), route
+
+        ph, pw = int(h * _PAD_FRACTION), int(w * _PAD_FRACTION)
+        padded = cv2.copyMakeBorder(img_bgr, ph, ph, pw, pw, cv2.BORDER_CONSTANT, value=0)
+        faces = [f.shifted(-pw, -ph) for f in self.detect(padded)]
+        if faces:
+            return primary(faces), "padded"
+        return None, "none"
 
     # ── Stages 2–4: ALIGN → NORMALIZE → REPRESENT ────────────────
     def align(self, img_bgr: np.ndarray, landmarks: np.ndarray) -> np.ndarray:

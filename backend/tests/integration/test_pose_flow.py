@@ -53,7 +53,7 @@ def _embed_by_image(uploads: list[tuple], results: list) -> MagicMock:
     concurrently on the inference pool, so call order is not file order.
     """
     by_bytes = {upload[1][1]: result for upload, result in zip(uploads, results)}
-    return MagicMock(side_effect=lambda content: by_bytes[content])
+    return MagicMock(side_effect=lambda content, *args: by_bytes[content])
 
 
 def _accepted(yaw: float, pitch: float = 0.0, fill: float = 0.1) -> PoseEmbedding:
@@ -67,12 +67,13 @@ def _rejected(yaw: float) -> PoseEmbedding:
 # ── Registration ─────────────────────────────────────────────────
 
 
-def test_register_stores_every_usable_pose_and_uses_most_frontal_as_primary(
+def test_register_stores_every_usable_pose_and_averages_them_as_primary(
     client, auth_headers, session
 ):
-    frontal = _accepted(3, fill=0.3)
+    left, frontal = _accepted(-35, fill=0.1), _accepted(3, fill=0.3)
+    left.embedding[:256] = -0.1
     uploads = [_png("left.png", 10), _png("front.png", 20), _png("profile.png", 30), _png("blank.png", 40)]
-    stub = _embed_by_image(uploads, [_accepted(-35, fill=0.1), frontal, _rejected(88), None])
+    stub = _embed_by_image(uploads, [left, frontal, _rejected(88), None])
 
     with patch("app.api.routes.pose.embed_with_pose", stub), \
          patch("app.api.routes.pose.register_profile_with_poses",
@@ -97,8 +98,12 @@ def test_register_stores_every_usable_pose_and_uses_most_frontal_as_primary(
 
     args, kwargs = store.call_args
     assert args[1] == "Jane Doe"
-    assert args[4] is frontal.embedding           # most frontal → profile embedding
+    # Profile embedding = normalised average of the accepted photos.
+    expected = (left.embedding + frontal.embedding) / 2
+    np.testing.assert_allclose(args[4], expected / np.linalg.norm(expected), rtol=1e-6)
     assert len(args[5]) == 2 and kwargs["tenant_id"] == 7
+    # Uploads for enrollment pick the centred face.
+    assert all(call.args[1:] == (True,) for call in stub.call_args_list)
     assert audit.call_args.kwargs["event_type"] == "REGISTER_POSES"
 
 

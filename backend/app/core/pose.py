@@ -53,11 +53,6 @@ class HeadPose:
     def bucket(self) -> str:
         return pose_bucket(self.yaw, self.pitch)
 
-    @property
-    def deviation(self) -> float:
-        """How far from frontal — used to choose the most frontal image."""
-        return abs(self.yaw) + abs(self.pitch)
-
 
 def estimate_pose(landmarks: np.ndarray) -> HeadPose:
     """Estimate yaw / pitch / roll from (5, 2) SCRFD landmarks in pixels."""
