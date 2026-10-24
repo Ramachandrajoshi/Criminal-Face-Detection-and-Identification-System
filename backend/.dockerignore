@@ -8,3 +8,6 @@ __pycache__
 env
 .git
 .gitignore
+
+# Local regression datasets (git-ignored too); keep them out of the build context
+testdata
