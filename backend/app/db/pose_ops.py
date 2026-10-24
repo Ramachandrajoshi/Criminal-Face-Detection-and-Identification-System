@@ -66,7 +66,7 @@ async def register_profile_with_poses(
     """
     Create a face profile and its pose embeddings in one transaction.
 
-    ``primary_embedding`` (the most frontal image) becomes the profile's own
+    ``primary_embedding`` (the average of the accepted photos) becomes the profile's own
     ``face_embedding`` as an InsightFace (version 4) vector, so the profile is
     also visible to the standard ``/search`` endpoint.
 

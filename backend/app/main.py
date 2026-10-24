@@ -139,11 +139,25 @@ def _warmup_models() -> None:
 
     if CURRENT_EMBEDDING_VERSION == INSIGHTFACE_EMBEDDING_VERSION:
         try:
+            import numpy as np
+
             from app.core.face_engine import get_engine
 
             # Loads (and on first run downloads) the ONNX models pre-traffic.
+            engine_start = time.perf_counter()
             engine = get_engine()
-            logger.info("Warmed InsightFace engine (providers=%s)", engine.providers)
+            # One detect + embed pass on blank input: the first GPU inference
+            # pays CUDA/cuDNN initialisation and, on GPUs newer than the ONNX
+            # Runtime build (e.g. Blackwell), about a minute of kernel JIT
+            # compilation — cached by the driver (CUDA_CACHE_PATH) afterwards.
+            engine.detect(np.zeros((engine.det_size, engine.det_size, 3), dtype=np.uint8))
+            # The "large" detection fallback runs at twice the input size.
+            engine.detect(np.zeros((engine.det_size, engine.det_size, 3), dtype=np.uint8), size=2 * engine.det_size)
+            engine.embed(np.zeros((112, 112, 3), dtype=np.uint8))
+            logger.info(
+                "Warmed InsightFace engine in %.0fms (providers=%s)",
+                (time.perf_counter() - engine_start) * 1000, engine.providers,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("InsightFace warm-up failed (%s) — will load lazily on first request", exc)
 

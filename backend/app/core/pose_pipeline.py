@@ -53,8 +53,8 @@ class PoseEstimate:
 def estimate_frame_pose(image_bytes: bytes) -> Optional[PoseEstimate]:
     """
     Detection + pose only — no embedding. Cheap enough for the webcam
-    enrollment screen to call several times a second for live guidance.
-    Returns None when no face is found.
+    enrollment screen to call several times a second for live guidance, so it
+    picks the face the way enrollment does. Returns None when no face is found.
     """
     import cv2
 
@@ -63,11 +63,10 @@ def estimate_frame_pose(image_bytes: bytes) -> Optional[PoseEstimate]:
     frame = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
         return None
-    faces = get_engine().detect(frame)
-    if not faces:
+    best, _ = get_engine().detect_primary(frame, prefer_center=True)
+    if best is None:
         return None
 
-    best = max(faces, key=lambda f: f.area)
     pose = estimate_pose(best.landmarks)
     h, w = frame.shape[:2]
     x1, y1, x2, y2 = (float(v) for v in best.bbox)
@@ -75,10 +74,11 @@ def estimate_frame_pose(image_bytes: bytes) -> Optional[PoseEstimate]:
     return PoseEstimate(pose, best.score, bbox, pose_rejection_reason(pose))
 
 
-def embed_with_pose(image_bytes: bytes) -> Optional[PoseEmbedding]:
+def embed_with_pose(image_bytes: bytes, enrollment: bool = False) -> Optional[PoseEmbedding]:
     """
-    Detect the largest face, estimate its pose, and embed it if the pose is
-    within limits.
+    Detect the primary face, estimate its pose, and embed it if the pose is
+    within limits. ``enrollment`` picks the centred face, otherwise the
+    largest fully visible one (see ``select_primary_face``).
 
     Returns None when no face is found. A face outside the pose limits comes
     back with ``embedding=None`` and ``rejected_reason`` set, so callers can
@@ -94,12 +94,11 @@ def embed_with_pose(image_bytes: bytes) -> Optional[PoseEmbedding]:
         return None
 
     engine = get_engine()
-    faces = engine.detect(frame)
-    if not faces:
+    best, route = engine.detect_primary(frame, prefer_center=enrollment)
+    if best is None:
         dump_note("insightface_detect", "no face above det threshold")
         return None
 
-    best = max(faces, key=lambda f: f.area)
     pose = estimate_pose(best.landmarks)
     pose_meta = {
         "yaw": round(pose.yaw, 1), "pitch": round(pose.pitch, 1),
@@ -107,7 +106,7 @@ def embed_with_pose(image_bytes: bytes) -> Optional[PoseEmbedding]:
     }
     dump_detection(
         "pose_01_detect", frame, best.bbox, best.landmarks,
-        label=f"scrfd {best.score:.2f} {pose.bucket}", score=best.score, **pose_meta,
+        label=f"scrfd {best.score:.2f} {pose.bucket}", score=best.score, detect_pass=route, **pose_meta,
     )
     logger.debug(
         "Pose: yaw=%.1f pitch=%.1f roll=%.1f bucket=%s score=%.2f",

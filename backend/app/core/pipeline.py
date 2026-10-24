@@ -398,9 +398,13 @@ def extract_embedding(
 
 
 # ---------- Stages 1-4 for version 4: InsightFace ----------
-def embed_with_insightface(image_bytes: bytes) -> Optional[np.ndarray]:
+def embed_with_insightface(image_bytes: bytes, enrollment: bool = False) -> Optional[np.ndarray]:
     """
-    Detect, align and embed the largest face with the InsightFace engine.
+    Detect, align and embed the primary face with the InsightFace engine.
+
+    ``enrollment`` picks the centred face (mugshots, ID photos); otherwise the
+    largest fully visible face is used, wherever it is (see
+    ``select_primary_face``).
 
     Returns the L2-normalised 512-d embedding, or None when no face is found.
     Engine failures (missing weights, ONNX Runtime errors) raise — callers
@@ -416,17 +420,16 @@ def embed_with_insightface(image_bytes: bytes) -> Optional[np.ndarray]:
         return None
 
     engine = get_engine()
-    faces = engine.detect(frame)
-    if not faces:
+    best, route = engine.detect_primary(frame, prefer_center=enrollment)
+    if best is None:
         logger.debug("InsightFace: no face above det threshold")
         dump_note("insightface_detect", "no face above det threshold")
         return None
 
-    best = max(faces, key=lambda f: f.area)
-    logger.debug("InsightFace: face score=%.2f area=%.0f", best.score, best.area)
+    logger.debug("InsightFace: face score=%.2f area=%.0f pass=%s", best.score, best.area, route)
     dump_detection(
         "v4_01_detect", frame, best.bbox, best.landmarks,
-        label=f"scrfd {best.score:.2f}", score=best.score,
+        label=f"scrfd {best.score:.2f}", score=best.score, detect_pass=route,
     )
     aligned = engine.align(frame, best.landmarks)
     dump_stage("v4_02_aligned_112", aligned)
@@ -440,13 +443,14 @@ class _NoFace:
 _NO_FACE = _NoFace()
 
 
-async def _embed_versions(content: bytes, versions: list[int]) -> dict:
+async def _embed_versions(content: bytes, versions: list[int], enrollment: bool = False) -> dict:
     """
     Embed ``content`` under each requested version.
 
     Returns {version: embedding | None | _NO_FACE}. DeepFace versions share one
     detection pass; InsightFace runs its own detector. Both engines run
-    concurrently on the inference pool.
+    concurrently on the inference pool. ``enrollment`` only changes which face
+    InsightFace picks when there are several.
     """
     deepface_versions = [v for v in versions if v in DEEPFACE_EMBEDDING_VERSIONS]
 
@@ -467,7 +471,7 @@ async def _embed_versions(content: bytes, versions: list[int]) -> dict:
         if INSIGHTFACE_EMBEDDING_VERSION not in versions:
             return {}
         try:
-            embedding = await run_inference(embed_with_insightface, content)
+            embedding = await run_inference(embed_with_insightface, content, enrollment)
         except Exception as exc:  # noqa: BLE001 — engine failure, not "no face"
             logger.error("InsightFace embedding failed: %s", exc)
             return {INSIGHTFACE_EMBEDDING_VERSION: None}
@@ -479,7 +483,7 @@ async def _embed_versions(content: bytes, versions: list[int]) -> dict:
 
 async def _embed_for_enrollment(content: bytes) -> tuple[Optional[np.ndarray], Optional[str]]:
     """Embed under the current recipe. Returns (embedding, error message)."""
-    result = (await _embed_versions(content, [CURRENT_EMBEDDING_VERSION]))[CURRENT_EMBEDDING_VERSION]
+    result = (await _embed_versions(content, [CURRENT_EMBEDDING_VERSION], enrollment=True))[CURRENT_EMBEDDING_VERSION]
     if result is _NO_FACE:
         return None, "No face detected in the uploaded image"
     if result is None:

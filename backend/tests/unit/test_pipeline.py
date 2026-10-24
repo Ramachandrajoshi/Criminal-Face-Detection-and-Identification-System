@@ -1208,31 +1208,32 @@ def _real_jpeg_bytes():
 
 
 class TestEmbedWithInsightface:
-    def _engine(self, faces):
+    def _engine(self, face):
         engine = MagicMock()
-        engine.detect.return_value = faces
+        engine.detect_primary.return_value = (face, "none" if face is None else "standard")
         engine.align.side_effect = lambda frame, kps: np.zeros((112, 112, 3), np.uint8)
         engine.embed.return_value = np.ones(512, np.float32) / np.sqrt(512)
         return engine
 
-    def test_embeds_the_largest_face(self):
+    def test_embeds_the_primary_face(self):
         from app.core.face_engine import DetectedFace
         from app.core.pipeline import embed_with_insightface
 
-        small = DetectedFace(np.array([0, 0, 10, 10.0]), 0.99, np.full((5, 2), 1.0))
-        large = DetectedFace(np.array([0, 0, 40, 40.0]), 0.60, np.full((5, 2), 2.0))
-        engine = self._engine([small, large])
+        face = DetectedFace(np.array([0, 0, 40, 40.0]), 0.60, np.full((5, 2), 2.0))
+        engine = self._engine(face)
 
         with patch("app.core.face_engine.get_engine", return_value=engine):
             emb = embed_with_insightface(_real_jpeg_bytes())
+            embed_with_insightface(_real_jpeg_bytes(), enrollment=True)
 
         assert emb.shape == (512,)
-        np.testing.assert_array_equal(engine.align.call_args.args[1], large.landmarks)
+        np.testing.assert_array_equal(engine.align.call_args.args[1], face.landmarks)
+        assert [c.kwargs["prefer_center"] for c in engine.detect_primary.call_args_list] == [False, True]
 
     def test_no_face_returns_none(self):
         from app.core.pipeline import embed_with_insightface
 
-        with patch("app.core.face_engine.get_engine", return_value=self._engine([])):
+        with patch("app.core.face_engine.get_engine", return_value=self._engine(None)):
             assert embed_with_insightface(_real_jpeg_bytes()) is None
 
     def test_undecodable_bytes_return_none(self):
@@ -1262,6 +1263,7 @@ class TestVersion4Enrollment:
 
         assert result["status"] == "REGISTERED"
         insight.assert_called_once()
+        assert insight.call_args.args[1] is True     # enrollment picks the centred face
         deepface_detect.assert_not_called()
         np.testing.assert_array_equal(reg.await_args.args[4], mock_embedding)
 

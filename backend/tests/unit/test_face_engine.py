@@ -222,6 +222,107 @@ def test_detect_letterboxes_portrait_frames(engine_factory):
     assert np.all(blob[0, :, :, :16] > 0)
 
 
+def test_detect_without_upscale_keeps_small_images_at_native_size(engine_factory):
+    engine, det, _ = engine_factory(_scrfd_outputs(64, {}))
+    engine.detect(np.full((16, 32, 3), 200, np.uint8), upscale=False)
+    blob = det.run.call_args.args[1][engine._det_input]
+    assert np.all(blob[0, :, :16, :32] > 0)
+    assert np.all(blob[0, :, 16:, :] == pytest.approx(-127.5 / 128))
+    assert np.all(blob[0, :, :, 32:] == pytest.approx(-127.5 / 128))
+
+
+def test_detect_size_overrides_detector_input(engine_factory):
+    engine, det, _ = engine_factory(_scrfd_outputs(64, {}))
+    engine.detect(np.zeros((40, 40, 3), np.uint8), size=128)
+    assert det.run.call_args.args[1][engine._det_input].shape == (1, 3, 128, 128)
+
+
+# ──────────────────────────────────────────────
+# Primary-face selection and detection fallbacks
+# ──────────────────────────────────────────────
+
+def _face(x1, y1, x2, y2, score=0.9):
+    return face_engine.DetectedFace(
+        np.array([x1, y1, x2, y2], dtype=np.float64), score, np.full((5, 2), (x1 + x2) / 2.0)
+    )
+
+
+def test_select_primary_face_prefers_the_fully_visible_face():
+    # LFW failure case: a bystander cut off at the left edge has the bigger
+    # box, but most of it lies outside the image.
+    subject = _face(83, 61, 174, 186)
+    bystander = _face(-29, 70, 69, 207)
+    assert bystander.area > subject.area
+    assert face_engine.select_primary_face([bystander, subject], (250, 250, 3)) is subject
+
+
+def test_select_primary_face_still_prefers_the_larger_visible_face():
+    near, far = _face(10, 10, 110, 110), _face(150, 10, 190, 50)
+    assert face_engine.select_primary_face([far, near], (250, 250, 3)) is near
+    assert face_engine.select_primary_face([], (250, 250, 3)) is None
+
+
+def test_select_primary_face_prefers_the_centred_face_for_enrollment():
+    subject = _face(100, 80, 150, 140)        # centred, small
+    bystander = _face(170, 20, 250, 120)      # larger, fully visible, off to the side
+    shape = (250, 250, 3)
+    assert face_engine.select_primary_face([subject, bystander], shape) is bystander
+    assert face_engine.select_primary_face([subject, bystander], shape, prefer_center=True) is subject
+
+
+def test_detect_primary_uses_standard_pass_when_it_finds_a_face(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    face = _face(5, 5, 30, 30)
+    with patch.object(engine, "detect", return_value=[face]) as detect:
+        assert engine.detect_primary(np.zeros((40, 40, 3), np.uint8)) == (face, "standard")
+    detect.assert_called_once()
+
+
+def test_detect_primary_passes_the_selection_rule_through(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    subject, bystander = _face(100, 80, 150, 140), _face(170, 20, 250, 120)
+    img = np.zeros((250, 250, 3), np.uint8)
+    with patch.object(engine, "detect", return_value=[subject, bystander]):
+        assert engine.detect_primary(img)[0] is bystander
+        assert engine.detect_primary(img, prefer_center=True)[0] is subject
+
+
+def test_detect_primary_retries_small_images_at_native_size(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    face = _face(5, 5, 30, 30)
+    with patch.object(engine, "detect", side_effect=[[], [face]]) as detect:
+        assert engine.detect_primary(np.zeros((40, 40, 3), np.uint8)) == (face, "native")
+    assert detect.call_args.kwargs == {"upscale": False}
+
+
+def test_detect_primary_retries_large_frames_at_double_size(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    face = _face(5, 5, 30, 30)
+    with patch.object(engine, "detect", side_effect=[[], [face]]) as detect:
+        assert engine.detect_primary(np.zeros((90, 200, 3), np.uint8)) == (face, "large")
+    assert detect.call_args.kwargs == {"size": 128}
+
+
+def test_detect_primary_pads_as_last_resort_and_maps_back(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    img = np.zeros((40, 50, 3), np.uint8)
+    in_padded = _face(20, 15, 60, 50)
+    with patch.object(engine, "detect", side_effect=[[], [], [in_padded]]) as detect:
+        face, route = engine.detect_primary(img)
+
+    assert route == "padded"
+    padded = detect.call_args.args[0]
+    assert padded.shape[:2] == (40 + 2 * 12, 50 + 2 * 15)
+    np.testing.assert_allclose(face.bbox, [5, 3, 45, 38])
+    np.testing.assert_allclose(face.landmarks, in_padded.landmarks - [15, 12])
+
+
+def test_detect_primary_reports_no_face(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    with patch.object(engine, "detect", return_value=[]):
+        assert engine.detect_primary(np.zeros((40, 40, 3), np.uint8)) == (None, "none")
+
+
 def test_align_produces_template_sized_crop(engine_factory):
     engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
     img = np.random.default_rng(0).integers(0, 255, (200, 200, 3), dtype=np.uint8)

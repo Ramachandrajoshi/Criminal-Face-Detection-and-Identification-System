@@ -12,6 +12,7 @@ Usage (inside the backend container, or any env with requirements installed):
 
     python scripts/benchmark_engines.py /data/faces --versions 3 4
     python scripts/benchmark_engines.py /data/faces --probe-transform backlight
+    python scripts/benchmark_engines.py /data/lfw --lfw-pairs /data/pairs.txt --probe-transform cctv
 
 Reports, per version:
   * detection rate                — images where a face was found
@@ -21,6 +22,9 @@ Reports, per version:
   * identification                — first image per person enrolled, the rest
     searched: correct accepts, false accepts, misses (what the app does)
   * latency p50 / p95 per image (detect → embed, warm)
+  * with --lfw-pairs: the official LFW 10-fold verification accuracy (the
+    protocol behind published "99.8%" figures); the second image of each
+    pair goes through --probe-transform
 
 Use the suggested thresholds as input to MATCH_THRESHOLD_INSIGHTFACE only
 after the bias audit (AGENTS.md §8). Impostor FAR below 1 / impostor-pair
@@ -76,6 +80,24 @@ def transform_probe(image_bytes: bytes, kind: str) -> bytes:
     img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return image_bytes
+
+    def jpeg(out: np.ndarray, quality: int) -> bytes:
+        return cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tobytes()
+
+    # Sizes assume head-and-shoulders photos like LFW (250 px wide, ~45 px
+    # between the eyes): "lowres" leaves ~14 px between the eyes, "cctv"
+    # ~20 px, inside a 1080p frame.
+    if kind in ("lowres", "cctv"):
+        s = min(1.0, (80 if kind == "lowres" else 120) / max(img.shape[:2]))
+        small = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        if kind == "lowres":
+            return jpeg(small, 70)
+        frame = np.full((1080, 1920, 3), 110, np.uint8)
+        frame[200:200 + small.shape[0], 300:300 + small.shape[1]] = small
+        return jpeg(frame, 80)
+    if kind == "blur":
+        return jpeg(cv2.GaussianBlur(img, (0, 0), 2.0), 40)
+
     x = img.astype(np.float32) / 255.0
     dark = 0.35 * x ** 2.6                         # heavily under-exposed subject
     if kind == "dark":
@@ -91,12 +113,15 @@ def transform_probe(image_bytes: bytes, kind: str) -> bytes:
 
 
 # ---------- Embedding ----------
-def make_embedder(version: int):
-    """Return bytes → embedding | None for one version, using the app's own pipeline code."""
+def make_embedder(version: int, enrollment: bool = False):
+    """
+    Return bytes → embedding | None for one version, using the app's own
+    pipeline code. ``enrollment`` picks faces the way registration does.
+    """
     from app.core import pipeline
 
     if version == INSIGHTFACE_EMBEDDING_VERSION:
-        return pipeline.embed_with_insightface
+        return lambda image_bytes: pipeline.embed_with_insightface(image_bytes, enrollment)
 
     def deepface_embed(image_bytes: bytes):
         aligned = pipeline.detect_face(image_bytes)
@@ -105,8 +130,8 @@ def make_embedder(version: int):
     return deepface_embed
 
 
-def embed_all(version: int, items: list[tuple[str, bytes]]) -> tuple[list, list[float]]:
-    embed = make_embedder(version)
+def embed_all(version: int, items: list[tuple[str, bytes]], enrollment: bool = False) -> tuple[list, list[float]]:
+    embed = make_embedder(version, enrollment)
     if items:
         embed(items[0][1])                         # warm-up: model load is not latency
     embeddings, latencies = [], []
@@ -199,6 +224,53 @@ def identification_metrics(labels, gallery_idx, probe_idx, gallery_emb, probe_em
     }
 
 
+def read_lfw_pairs(path: Path) -> list[tuple[str, str, int, int]]:
+    """LFW pairs.txt → [(image_a, image_b, same_person, fold)], paths relative to the dataset."""
+    lines = path.read_text().strip().splitlines()
+    per_fold = int(lines[0].split()[1])
+    pairs = []
+    for i, line in enumerate(lines[1:]):
+        p = line.split()
+        fold = i // (2 * per_fold)
+        if len(p) == 3:
+            pairs.append((f"{p[0]}/{p[0]}_{int(p[1]):04d}.jpg", f"{p[0]}/{p[0]}_{int(p[2]):04d}.jpg", 1, fold))
+        else:
+            pairs.append((f"{p[0]}/{p[0]}_{int(p[1]):04d}.jpg", f"{p[2]}/{p[2]}_{int(p[3]):04d}.jpg", 0, fold))
+    return pairs
+
+
+def lfw_pair_metrics(version: int, root: Path, pairs, probe_transform: str) -> dict:
+    """
+    Official LFW protocol: per fold, the threshold that is best on the other
+    nine folds is applied to this one. A pair with no face found counts as
+    "different people".
+    """
+    enroll, search = make_embedder(version, enrollment=True), make_embedder(version)
+    first = {a: enroll((root / a).read_bytes()) for a in {p[0] for p in pairs}}
+    second = {b: search(transform_probe((root / b).read_bytes(), probe_transform)) for b in {p[1] for p in pairs}}
+    sims = np.array([
+        -1.0 if first[a] is None or second[b] is None else 1.0 - cosine_distance(first[a], second[b])
+        for a, b, _, _ in pairs
+    ])
+    same = np.array([p[2] for p in pairs])
+    folds = np.array([p[3] for p in pairs])
+    accuracies = []
+    for k in np.unique(folds):
+        train, test = folds != k, folds == k
+        order = np.argsort(-sims[train])
+        y = same[train][order]
+        # Accuracy when every pair at or above each candidate threshold is "same".
+        acc = (np.cumsum(y) + ((1 - y).sum() - np.cumsum(1 - y))) / len(y)
+        threshold = sims[train][order][np.argmax(acc)]
+        accuracies.append(float(((sims[test] >= threshold) == same[test]).mean()))
+    return {
+        "pairs": len(pairs),
+        "accuracy_mean": float(np.mean(accuracies)),
+        "accuracy_std": float(np.std(accuracies)),
+        "no_face": sum(e is None for e in first.values()) + sum(e is None for e in second.values()),
+    }
+
+
 def gpu_memory_used_mb():
     try:
         import subprocess
@@ -220,8 +292,10 @@ def main() -> None:
                         choices=SUPPORTED_EMBEDDING_VERSIONS)
     parser.add_argument("--max-per-identity", type=int, default=10)
     parser.add_argument("--impostor-pairs", type=int, default=20000)
-    parser.add_argument("--probe-transform", choices=["none", "dark", "backlight"], default="none",
-                        help="degrade probe (non-gallery) images to simulate poor capture")
+    parser.add_argument("--probe-transform", choices=["none", "dark", "backlight", "lowres", "blur", "cctv"],
+                        default="none", help="degrade probe (non-gallery) images to simulate poor capture")
+    parser.add_argument("--lfw-pairs", type=Path,
+                        help="LFW pairs.txt: also report the official 10-fold verification accuracy")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, help="write the full report as JSON")
     args = parser.parse_args()
@@ -253,7 +327,7 @@ def main() -> None:
         rng = np.random.default_rng(args.seed)
         threshold = match_threshold_for_version(version)
 
-        clean_emb, lat = embed_all(version, [(labels[i], raw[i]) for i in range(len(raw))])
+        clean_emb, lat = embed_all(version, [(labels[i], raw[i]) for i in range(len(raw))], enrollment=True)
         probe_emb, _ = embed_all(version, [(labels[i], probe_bytes[i]) for i in probe_idx])
 
         result = {
@@ -271,6 +345,10 @@ def main() -> None:
         if version == INSIGHTFACE_EMBEDDING_VERSION:
             from app.core.face_engine import get_engine
             result["providers"] = get_engine().providers
+        if args.lfw_pairs:
+            result["lfw_pairs"] = lfw_pair_metrics(
+                version, args.dataset, read_lfw_pairs(args.lfw_pairs), args.probe_transform
+            )
         report["versions"][version] = result
 
         v, ident = result["verification"], result["identification"]
@@ -293,6 +371,10 @@ def main() -> None:
             print(f"probe→own enrolment   mean distance {ident['probe_to_own_enrolment_distance_mean']:.3f}")
         if result.get("providers"):
             print(f"providers             {result['providers']}")
+        if "lfw_pairs" in result:
+            lp = result["lfw_pairs"]
+            print(f"LFW 10-fold accuracy  {lp['accuracy_mean']:.2%} ± {lp['accuracy_std']:.2%}  "
+                  f"({lp['pairs']} pairs, {lp['no_face']} images with no face)")
 
     if args.out:
         args.out.write_text(json.dumps(report, indent=2))
