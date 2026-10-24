@@ -627,6 +627,7 @@ async def delete_face(
         distance=None,
         gps_lat=None,
         gps_lon=None,
+        tenant_id=tenant_id,
     )
 
     await session.execute(
