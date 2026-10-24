@@ -4,17 +4,37 @@ Integration test: full register flow with test database.
 
 import io
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from app.core.auth import create_access_token
+from app.db.session import get_session
 from app.main import app
 
 
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture
+def auth_headers():
+    return {"Authorization": f"Bearer {create_access_token({'sub': 'operator', 'role': 'admin'})}"}
+
+
+@pytest.fixture
+def session():
+    session = AsyncMock()
+
+    async def override_session():
+        yield session
+
+    with patch.dict(app.dependency_overrides, {get_session: override_session}):
+        yield session
 
 
 class TestRegisterFlow:
@@ -99,3 +119,54 @@ class TestRegisterFlow:
             },
         )
         assert response.status_code in (400, 401)
+
+
+def _stored_face(session):
+    face = SimpleNamespace(
+        id=6, face_name="Old Name", alias=None, demographics=None,
+        embedding_version=4, created_at=None, tenant_id=1,
+    )
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = face
+    session.execute.return_value = result
+    return face
+
+
+class TestUpdateFace:
+    """PATCH /api/v1/faces/{id}: JSON route alongside the original form-based route."""
+
+    @pytest.mark.parametrize("name_key", ["faceName", "face_name"])
+    def test_json_body_updates_face(self, client, auth_headers, session, name_key):
+        """JSON bodies are applied, in camelCase (as the web UI sends) or snake_case."""
+        face = _stored_face(session)
+
+        response = client.patch(
+            "/api/v1/faces/6",
+            json={name_key: "  New Name ", "alias": "NN"},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert face.face_name == "New Name"
+        assert response.json()["faceName"] == "New Name"
+        assert response.json()["alias"] == "NN"
+        session.commit.assert_awaited_once()
+
+    def test_json_body_scopes_lookup_to_tenant_query_param(self, client, auth_headers, session):
+        """tenant_id comes from the query string, like GET /faces/{id}."""
+        _stored_face(session)
+
+        response = client.patch("/api/v1/faces/6?tenant_id=2", json={"alias": "NN"}, headers=auth_headers)
+
+        assert response.status_code == 200, response.text
+        lookup = session.execute.await_args.args[0]
+        assert lookup.compile().params == {"id_1": 6, "tenant_id_1": 2}
+
+    def test_non_json_requests_still_reach_form_route(self, client, auth_headers, session):
+        """Non-JSON requests go to the original form route and its own validation, not the JSON one."""
+        _stored_face(session)
+
+        response = client.patch("/api/v1/faces/6", data={"face_name": "New Name"}, headers=auth_headers)
+
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["body", "body"]
