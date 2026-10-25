@@ -317,6 +317,91 @@ def test_detect_primary_pads_as_last_resort_and_maps_back(engine_factory):
     np.testing.assert_allclose(face.landmarks, in_padded.landmarks - [15, 12])
 
 
+# Upright landmarks (eyes, nose, mouth corners) and how they sit on the same
+# 40 x 60 image (h x w) turned 1-3 quarter turns clockwise.
+_UPRIGHT_KPS = np.array([[22, 14], [38, 14], [30, 22], [24, 30], [36, 30]], dtype=np.float64)
+
+
+def _turn_points(pts, turns, h, w):
+    """Where (x, y) on an h x w image lands after ``turns`` clockwise quarter turns."""
+    for _ in range(turns):
+        pts = np.stack([h - 1 - pts[:, 1], pts[:, 0]], axis=1)
+        h, w = w, h
+    return pts
+
+
+def _face_at(kps, score=0.9):
+    return face_engine.DetectedFace(
+        np.concatenate([kps.min(axis=0) - 6, kps.max(axis=0) + 6]), score, kps
+    )
+
+
+@pytest.mark.parametrize("turned_by, needed", [(0, 0), (1, 3), (2, 2), (3, 1)])
+def test_quarter_turns_to_upright_undoes_a_turn(turned_by, needed):
+    kps = _turn_points(_UPRIGHT_KPS, turned_by, 40, 60)
+    assert face_engine.quarter_turns_to_upright(kps) == needed
+
+
+def test_quarter_turns_to_upright_tolerates_tilt_up_to_45_degrees():
+    a = np.radians(40)
+    rot = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+    centre = _UPRIGHT_KPS.mean(axis=0)
+    assert face_engine.quarter_turns_to_upright((_UPRIGHT_KPS - centre) @ rot.T + centre) == 0
+
+
+def test_quarter_turns_to_upright_needs_eyes_and_mouth_to_agree():
+    # Profile view: the eyes almost coincide, so the eye line points anywhere.
+    profile = _UPRIGHT_KPS.copy()
+    profile[1] = profile[0] + [0.2, -1.0]
+    assert face_engine.quarter_turns_to_upright(profile) == 0
+    assert face_engine.quarter_turns_to_upright(np.full((5, 2), 7.0)) == 0
+
+
+@pytest.mark.parametrize("turns", [1, 2, 3])
+def test_unturned_maps_a_face_back_onto_the_original_image(turns):
+    h, w = 40, 60
+    original = _face_at(_UPRIGHT_KPS)
+    turned_kps = _turn_points(_UPRIGHT_KPS, turns, h, w)
+    back = _face_at(turned_kps).unturned(turns, (h, w))
+    np.testing.assert_allclose(back.landmarks, original.landmarks)
+    np.testing.assert_allclose(back.bbox, original.bbox)
+
+
+def test_detect_primary_finds_a_sideways_face_again_upright(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    img = np.zeros((40, 60, 3), np.uint8)
+    # The photo was stored a quarter turn anticlockwise: its face lies sideways.
+    sideways_kps = _turn_points(_UPRIGHT_KPS, 3, 40, 60)
+    sideways_img = np.zeros((60, 40, 3), np.uint8)
+    rough = _face_at(sideways_kps + [[1.5, -2.0], [-2.0, 1.0], [0, 2.5], [2.0, 0], [-1.0, -1.5]])
+    with patch.object(engine, "detect", side_effect=[[rough], [_face_at(_UPRIGHT_KPS)]]) as detect:
+        face, route = engine.detect_primary(sideways_img)
+
+    assert route == "standard+rot90"
+    assert detect.call_args.args[0].shape == img.shape  # searched again on the copy turned upright
+    np.testing.assert_allclose(face.landmarks, sideways_kps)  # in the stored photo's coordinates
+    assert face_engine.quarter_turns_to_upright(face.landmarks) == 1
+
+
+def test_detect_primary_keeps_a_sideways_face_the_turned_copy_does_not_confirm(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    sideways_img = np.zeros((60, 40, 3), np.uint8)
+    sideways = _face_at(_turn_points(_UPRIGHT_KPS, 3, 40, 60))
+    elsewhere = _face_at(_UPRIGHT_KPS + [0, 30])  # another (upright) face, not the same one
+    still_sideways = _face_at(_turn_points(_UPRIGHT_KPS, 1, 40, 60))
+    for found_on_turned in ([], [elsewhere], [still_sideways]):
+        with patch.object(engine, "detect", side_effect=[[sideways], found_on_turned, [], []]):
+            assert engine.detect_primary(sideways_img) == (sideways, "standard")
+
+
+def test_detect_primary_does_not_turn_an_upright_face(engine_factory):
+    engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
+    face = _face_at(_UPRIGHT_KPS)
+    with patch.object(engine, "detect", return_value=[face]) as detect:
+        assert engine.detect_primary(np.zeros((40, 60, 3), np.uint8)) == (face, "standard")
+    detect.assert_called_once()
+
+
 def test_detect_primary_reports_no_face(engine_factory):
     engine, _, _ = engine_factory(_scrfd_outputs(64, {}))
     with patch.object(engine, "detect", return_value=[]):

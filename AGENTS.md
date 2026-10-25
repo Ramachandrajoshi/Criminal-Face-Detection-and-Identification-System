@@ -215,7 +215,7 @@ they keep matching until re-enrolled under the new version.
 | Version | Engine | Notes |
 | ------- | ------ | ----- |
 | 1–3 | DeepFace ArcFace + `_preprocess_for_arcface` recipe | Default (`EMBEDDING_VERSION=3`) |
-| 4 | InsightFace ONNX (`face_engine.py`) | Own threshold `MATCH_THRESHOLD_INSIGHTFACE`; calibrate with `scripts/benchmark_engines.py` + bias audit (§8). Face choice and no-face fallbacks live in `detect_primary`; a single-face photo found by the standard pass embeds exactly as at release |
+| 4 | InsightFace ONNX (`face_engine.py`) | Own threshold `MATCH_THRESHOLD_INSIGHTFACE`; calibrate with `scripts/benchmark_engines.py` + bias audit (§8). Face choice, no-face fallbacks and the second detection of sideways or upside-down faces (on a copy turned upright) live in `detect_primary`; a single-face photo found by the standard pass with the face within 45° of upright embeds exactly as at release |
 
 Changing how an existing version produces embeddings is forbidden — add a new version.
 

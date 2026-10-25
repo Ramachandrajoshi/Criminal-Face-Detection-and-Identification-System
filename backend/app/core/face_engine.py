@@ -59,6 +59,9 @@ _NMS_THRESHOLD = 0.4
 # Border added on every side, as a fraction of the image, by the last
 # detection fallback (see InsightFaceEngine.detect_primary).
 _PAD_FRACTION = 0.3
+# Overlap (IoU) a face found on the turned copy of the image needs with the
+# sideways face it replaces, so a neighbour's face is never swapped in.
+_TURN_MIN_IOU = 0.3
 
 
 @dataclass
@@ -81,6 +84,53 @@ class DetectedFace:
         return DetectedFace(
             self.bbox + np.array([dx, dy, dx, dy]), self.score, self.landmarks + np.array([dx, dy])
         )
+
+    def unturned(self, turns: int, image_shape: tuple) -> "DetectedFace":
+        """
+        This face, found on a copy of the image turned ``turns`` × 90°
+        clockwise, in the coordinates of the image of ``image_shape`` before
+        the turn.
+        """
+        h, w = image_shape[:2]
+
+        def back(pts: np.ndarray) -> np.ndarray:
+            u, v = pts[:, 0], pts[:, 1]
+            if turns == 1:
+                return np.stack([v, h - 1 - u], axis=1)
+            if turns == 2:
+                return np.stack([w - 1 - u, h - 1 - v], axis=1)
+            return np.stack([w - 1 - v, u], axis=1)
+
+        corners = back(self.bbox.reshape(2, 2))
+        return DetectedFace(
+            np.concatenate([corners.min(axis=0), corners.max(axis=0)]), self.score, back(self.landmarks)
+        )
+
+
+def quarter_turns_to_upright(landmarks: np.ndarray) -> int:
+    """
+    Clockwise quarter turns (0–3) that bring the face upright: 0 while it is
+    within 45° of upright, 1 for a face lying with its top to the left, 2 for
+    one upside down, 3 for one with its top to the right.
+
+    The eye line and the eyes-to-mouth direction must agree, so a profile
+    face, whose eyes nearly coincide, is never taken for a turned one.
+    """
+    eyes = landmarks[1] - landmarks[0]
+    down = (landmarks[3] + landmarks[4] - landmarks[0] - landmarks[1]) / 2
+    # Both angles are 0 for an upright face and grow by 90° per clockwise turn.
+    roll = np.degrees(np.arctan2(eyes[1], eyes[0]))
+    tilt = np.degrees(np.arctan2(-down[0], down[1]))
+    turns = {int(round(-a / 90.0)) % 4 for a in (roll, tilt)}
+    return turns.pop() if len(turns) == 1 else 0
+
+
+def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = iw * ih
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return float(inter / union) if union > 0 else 0.0
 
 
 def select_primary_face(
@@ -343,15 +393,43 @@ class InsightFaceEngine:
           large  — a frame bigger than the input, at twice the input size, for
                    faces too small to survive the downscale (CCTV).
           padded — a black border round the image, for faces cut off at the edge.
+
+        A face lying sideways or upside down (more than 45° from upright, see
+        ``quarter_turns_to_upright``) is then found again on a copy of the
+        image turned upright, and the pass name gains "+rot90" | "+rot180" |
+        "+rot270". Alignment turns any face upright, but SCRFD's landmarks on a
+        turned face are a few pixels off, which is enough to wreck the
+        embedding. One person's sideways phone selfies scored 0.61–0.82 against
+        their own photos, and 0.15–0.17 once turned upright. An upright face
+        skips this step, so it embeds exactly as before.
         """
         import cv2
 
-        def primary(faces: list[DetectedFace]) -> DetectedFace:
-            return select_primary_face(faces, img_bgr.shape, prefer_center)
+        faces, route = self._detect_passes(img_bgr)
+        face = select_primary_face(faces, img_bgr.shape, prefer_center)
+        turns = 0 if face is None else quarter_turns_to_upright(face.landmarks)
+        if not turns:
+            return face, route
+
+        rotation = {1: cv2.ROTATE_90_CLOCKWISE, 2: cv2.ROTATE_180, 3: cv2.ROTATE_90_COUNTERCLOCKWISE}[turns]
+        upright = [
+            f.unturned(turns, img_bgr.shape)
+            for f in self._detect_passes(cv2.rotate(img_bgr, rotation))[0]
+            if quarter_turns_to_upright(f.landmarks) == 0
+        ]
+        # The same face, never a neighbour that happens to be upright.
+        best = max(upright, key=lambda f: _iou(f.bbox, face.bbox), default=None)
+        if best is None or _iou(best.bbox, face.bbox) < _TURN_MIN_IOU:
+            return face, route
+        return best, f"{route}+rot{90 * turns}"
+
+    def _detect_passes(self, img_bgr: np.ndarray) -> tuple[list[DetectedFace], str]:
+        """The faces from the first pass of ``detect_primary`` that finds any."""
+        import cv2
 
         faces = self.detect(img_bgr)
         if faces:
-            return primary(faces), "standard"
+            return faces, "standard"
 
         h, w = img_bgr.shape[:2]
         if max(h, w) < self.det_size:
@@ -359,14 +437,14 @@ class InsightFaceEngine:
         elif max(h, w) > self.det_size:
             faces, route = self.detect(img_bgr, size=2 * self.det_size), "large"
         if faces:
-            return primary(faces), route
+            return faces, route
 
         ph, pw = int(h * _PAD_FRACTION), int(w * _PAD_FRACTION)
         padded = cv2.copyMakeBorder(img_bgr, ph, ph, pw, pw, cv2.BORDER_CONSTANT, value=0)
         faces = [f.shifted(-pw, -ph) for f in self.detect(padded)]
         if faces:
-            return primary(faces), "padded"
-        return None, "none"
+            return faces, "padded"
+        return [], "none"
 
     # ── Stages 2–4: ALIGN → NORMALIZE → REPRESENT ────────────────
     def align(self, img_bgr: np.ndarray, landmarks: np.ndarray) -> np.ndarray:
