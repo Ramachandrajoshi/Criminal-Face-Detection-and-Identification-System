@@ -127,6 +127,70 @@ async def add_poses(
     return pose_ids
 
 
+async def replace_poses(
+    session,
+    face_id: int,
+    primary_embedding: np.ndarray,
+    poses: list[tuple[np.ndarray, HeadPose, float]],
+    tenant_id: int = 1,
+) -> Optional[list[int]]:
+    """
+    Re-enrol an existing profile from a new set of poses in one transaction.
+
+    The profile's old pose embeddings are deleted and ``poses`` stored in
+    their place. ``primary_embedding`` replaces the profile's own
+    ``face_embedding`` as a version 4 vector, as for a new profile in
+    ``register_profile_with_poses``. Name, alias and demographics are kept.
+
+    Returns the new pose ids, or None when the profile does not exist (nothing
+    is changed).
+    """
+    vector = np.asarray(primary_embedding, dtype=np.float32)
+    try:
+        # Updating the profile first locks its row, so two re-enrolments of the
+        # same face run one after the other instead of mixing their poses.
+        result = await session.execute(
+            text(
+                """
+                UPDATE face_profiles
+                SET face_embedding     = CAST(:vec AS vector),
+                    face_embedding_enc = :enc,
+                    embedding_version  = :embedding_version
+                WHERE id = :face_id AND tenant_id = :tenant_id
+                RETURNING id
+                """
+            ),
+            {
+                "face_id": face_id,
+                "tenant_id": tenant_id,
+                "vec": _vec_literal(vector),
+                "enc": encrypt_embedding_vector(vector),
+                "embedding_version": INSIGHTFACE_EMBEDDING_VERSION,
+            },
+        )
+        if result.fetchone() is None:
+            await session.rollback()
+            return None
+        await session.execute(
+            text(
+                """
+                DELETE FROM face_pose_embeddings
+                WHERE face_id = :face_id AND tenant_id = :tenant_id
+                """
+            ),
+            {"face_id": face_id, "tenant_id": tenant_id},
+        )
+        pose_ids = [
+            await _insert_pose(session, face_id, emb, pose, quality, tenant_id)
+            for emb, pose, quality in poses
+        ]
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    return pose_ids
+
+
 async def count_poses(session, face_id: int, tenant_id: int = 1) -> int:
     result = await session.execute(
         text(

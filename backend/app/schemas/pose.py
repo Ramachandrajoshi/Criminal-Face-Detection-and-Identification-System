@@ -34,7 +34,7 @@ class PoseImageResult(_BaseCamel):
 
 
 class PoseRegisterResponse(_BaseCamel):
-    status: str  # "REGISTERED" | "POSES_ADDED"
+    status: str  # "REGISTERED" | "POSES_ADDED" | "POSES_REPLACED"
     profile_id: int
     accepted: int
     rejected: int

@@ -184,6 +184,64 @@ def test_add_poses_unknown_face(client, auth_headers, session):
     assert response.status_code == 404
 
 
+# ── Re-registering an existing profile ────────────────────────────
+
+
+def test_replace_poses_re_registers_a_full_profile(client, auth_headers, session):
+    _face_row(session)
+    left, frontal = _accepted(-35, fill=0.1), _accepted(3, fill=0.3)
+    left.embedding[:256] = -0.1
+    uploads = [_png("left.png", 10), _png("front.png", 20), _png("blank.png", 30)]
+    # The face already holds the maximum: replacing must not count old poses.
+    with patch("app.api.routes.pose.embed_with_pose", _embed_by_image(uploads, [left, frontal, None])),          patch("app.api.routes.pose.count_poses", AsyncMock(return_value=20)) as count,          patch("app.api.routes.pose.add_poses", AsyncMock()) as add,          patch("app.api.routes.pose.replace_poses", AsyncMock(return_value=[7, 8])) as replace,          patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=1)) as audit:
+        response = client.put(
+            "/api/v1/pose/faces/12/poses", headers=auth_headers,
+            data={"tenant_id": 7}, files=uploads,
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "POSES_REPLACED" and body["profileId"] == 12
+    assert (body["accepted"], body["rejected"]) == (2, 1)
+    assert [i["poseId"] for i in body["images"]] == [7, 8, None]
+    count.assert_not_awaited()
+    add.assert_not_awaited()
+
+    args, kwargs = replace.call_args
+    assert args[1] == 12 and kwargs["tenant_id"] == 7
+    # Main embedding = normalised average of the new photos, as in /pose/register.
+    expected = (left.embedding + frontal.embedding) / 2
+    np.testing.assert_allclose(args[2], expected / np.linalg.norm(expected), rtol=1e-6)
+    assert len(args[3]) == 2
+    assert audit.call_args.kwargs["event_type"] == "REGISTER_POSES_REPLACE"
+
+
+def test_replace_poses_keeps_old_poses_when_no_image_is_usable(client, auth_headers, session):
+    _face_row(session)
+    uploads = [_png("a.png", 10), _png("b.png", 20)]
+    with patch("app.api.routes.pose.embed_with_pose", _embed_by_image(uploads, [_rejected(85), None])),          patch("app.api.routes.pose.replace_poses", AsyncMock()) as replace:
+        response = client.put("/api/v1/pose/faces/12/poses", headers=auth_headers, files=uploads)
+
+    assert response.status_code == 422
+    replace.assert_not_awaited()
+
+
+def test_replace_poses_unknown_face(client, auth_headers, session):
+    _face_row(session, name=None)
+    with patch("app.api.routes.pose.replace_poses", AsyncMock()) as replace:
+        response = client.put("/api/v1/pose/faces/99/poses", headers=auth_headers, files=[_png("a.png")])
+    assert response.status_code == 404
+    replace.assert_not_awaited()
+
+
+def test_replace_poses_face_deleted_meanwhile(client, auth_headers, session):
+    _face_row(session)
+    with patch("app.api.routes.pose.embed_with_pose", side_effect=[_accepted(0)]),          patch("app.api.routes.pose.replace_poses", AsyncMock(return_value=None)),          patch("app.api.routes.pose.add_audit_entry", AsyncMock()) as audit:
+        response = client.put("/api/v1/pose/faces/12/poses", headers=auth_headers, files=[_png("a.png")])
+    assert response.status_code == 404
+    audit.assert_not_awaited()
+
+
 # ── Live pose estimate ────────────────────────────────────────────
 
 

@@ -6,6 +6,7 @@ Endpoints
 ---------
 POST   /api/v1/pose/register                      new profile from 1–10 photos at different angles
 POST   /api/v1/pose/faces/{face_id}/poses         add angle photos to an existing profile
+PUT    /api/v1/pose/faces/{face_id}/poses         re-register: replace all of a profile's poses
 GET    /api/v1/pose/faces/{face_id}/poses         list a profile's enrolled poses
 DELETE /api/v1/pose/faces/{face_id}/poses/{pid}   remove one pose
 POST   /api/v1/pose/search                        match a frame against every enrolled pose
@@ -49,6 +50,7 @@ from app.db.pose_ops import (
     list_poses,
     pose_ann_query,
     register_profile_with_poses,
+    replace_poses,
 )
 from app.db.session import get_session
 from app.db.vector_ops import add_audit_entry, compute_query_hash, create_alert
@@ -136,6 +138,12 @@ def _accepted(embedded) -> list[PoseEmbedding]:
     return [r for _, r, err in embedded if err is None]
 
 
+def _template(accepted: list[PoseEmbedding]) -> np.ndarray:
+    """Normalised average of the accepted photos: the profile's main embedding."""
+    template = np.mean([r.embedding for r in accepted], axis=0).astype(np.float32)
+    return template / np.linalg.norm(template)
+
+
 def _rejection_detail(embedded) -> dict:
     return {
         "error": "No usable face in any uploaded image",
@@ -194,8 +202,7 @@ async def register_with_poses(
             detail=f"A face can hold at most {settings.pose_max_per_face} poses",
         )
 
-    template = np.mean([r.embedding for r in accepted], axis=0).astype(np.float32)
-    template /= np.linalg.norm(template)
+    template = _template(accepted)
     profile_id, pose_ids = await register_profile_with_poses(
         session,
         face_name.strip(),
@@ -250,6 +257,9 @@ async def add_face_poses(
     Add pose photos to an existing profile — including profiles registered
     through the standard ``/register`` endpoint. The profile's main embedding
     is not changed, so the standard ``/search`` behaves exactly as before.
+
+    The poses already stored are kept, so a profile fills up after
+    POSE_MAX_PER_FACE photos. To enrol the same person again, use ``PUT``.
     """
     face_name = await _require_face(session, face_id, tenant_id)
 
@@ -282,6 +292,65 @@ async def add_face_poses(
 
     return PoseRegisterResponse(
         status="POSES_ADDED",
+        profile_id=face_id,
+        accepted=len(accepted),
+        rejected=len(embedded) - len(accepted),
+        pose_buckets=sorted({r.pose.bucket for r in accepted}),
+        images=_image_results(embedded, pose_ids),
+        tenant_id=tenant_id,
+    )
+
+
+@router.put("/faces/{face_id}/poses", response_model=PoseRegisterResponse)
+async def replace_face_poses(
+    face_id: int,
+    files: List[UploadFile] = File(..., description="1–10 photos at different angles"),
+    tenant_id: int = Form(1, ge=1, description="Tenant identifier (default: 1)"),
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+):
+    """
+    Re-register a profile: replace all of its poses with these photos.
+
+    The old pose embeddings are deleted and the profile's main embedding
+    becomes the average of the new photos (version 4), as with
+    ``/pose/register``, so the old photos no longer match in ``/search`` or
+    ``/pose/search``. Name, alias and demographics are kept. When no photo is
+    usable the request fails with 422 and the profile is left unchanged.
+    """
+    face_name = await _require_face(session, face_id, tenant_id)
+
+    embedded = await _embed_uploads(files)
+    accepted = _accepted(embedded)
+    if not accepted:
+        raise HTTPException(status_code=422, detail=_rejection_detail(embedded))
+    if len(accepted) > settings.pose_max_per_face:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A face can hold at most {settings.pose_max_per_face} poses",
+        )
+
+    template = _template(accepted)
+    pose_ids = await replace_poses(
+        session,
+        face_id,
+        template,
+        [(r.embedding, r.pose, r.quality) for r in accepted],
+        tenant_id=tenant_id,
+    )
+    if pose_ids is None:  # deleted while the photos were being embedded
+        raise HTTPException(status_code=404, detail="Face not found")
+
+    await add_audit_entry(
+        session,
+        event_type="REGISTER_POSES_REPLACE",
+        query_hash=compute_query_hash(template.tobytes()),
+        result_name=face_name,
+        tenant_id=tenant_id,
+    )
+
+    return PoseRegisterResponse(
+        status="POSES_REPLACED",
         profile_id=face_id,
         accepted=len(accepted),
         rejected=len(embedded) - len(accepted),

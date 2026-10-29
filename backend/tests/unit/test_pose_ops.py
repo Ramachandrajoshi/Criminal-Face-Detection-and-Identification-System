@@ -92,6 +92,48 @@ class TestAddAndCountPoses:
         assert session.execute.await_args.args[1] == {"face_id": 6, "tenant_id": 2}
 
 
+class TestReplacePoses:
+    async def test_replaces_profile_embedding_and_every_pose_in_one_transaction(self):
+        session = AsyncMock()
+        session.execute.side_effect = [_rows([], fetchone=(6,)), MagicMock(), *_returning(301, 302)]
+        template = _unit(3)
+
+        pose_ids = await pose_ops.replace_poses(session, 6, template, [LEFT, FRONT], tenant_id=2)
+
+        assert pose_ids == [301, 302]
+        calls = session.execute.await_args_list
+        update_sql, update_params = calls[0].args
+        assert "UPDATE face_profiles" in str(update_sql)
+        assert (update_params["face_id"], update_params["tenant_id"]) == (6, 2)
+        assert update_params["embedding_version"] == INSIGHTFACE_EMBEDDING_VERSION
+        np.testing.assert_allclose(decrypt_embedding_bytes(update_params["enc"]), template, rtol=1e-6)
+        delete_sql, delete_params = calls[1].args
+        assert "DELETE FROM face_pose_embeddings" in str(delete_sql)
+        assert delete_params == {"face_id": 6, "tenant_id": 2}
+        assert [c.args[1]["pose_bucket"] for c in calls[2:]] == [LEFT[1].bucket, FRONT[1].bucket]
+        assert all((c.args[1]["face_id"], c.args[1]["tenant_id"]) == (6, 2) for c in calls[2:])
+        session.commit.assert_awaited_once()
+        session.rollback.assert_not_awaited()
+
+    async def test_unknown_profile_changes_nothing(self):
+        session = AsyncMock()
+        session.execute.return_value = _rows([], fetchone=None)
+
+        assert await pose_ops.replace_poses(session, 99, _unit(3), [LEFT]) is None
+
+        assert session.execute.await_count == 1  # no DELETE or INSERT
+        session.rollback.assert_awaited_once()
+        session.commit.assert_not_awaited()
+
+    async def test_failure_rolls_back_so_old_poses_survive(self):
+        session = AsyncMock()
+        session.execute.side_effect = [_rows([], fetchone=(6,)), MagicMock(), RuntimeError("lost connection")]
+        with pytest.raises(RuntimeError):
+            await pose_ops.replace_poses(session, 6, _unit(3), [LEFT])
+        session.rollback.assert_awaited_once()
+        session.commit.assert_not_awaited()
+
+
 class TestListAndDeletePoses:
     async def test_list_rounds_float32_noise_and_never_returns_embeddings(self):
         created = datetime(2026, 10, 24, tzinfo=timezone.utc)

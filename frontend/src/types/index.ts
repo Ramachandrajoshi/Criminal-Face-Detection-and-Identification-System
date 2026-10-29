@@ -132,7 +132,7 @@ export interface PoseImageResult {
 }
 
 export interface PoseRegisterResponse {
-  status: 'REGISTERED' | 'POSES_ADDED';
+  status: 'REGISTERED' | 'POSES_ADDED' | 'POSES_REPLACED';
   profileId: number;
   accepted: number;
   rejected: number;

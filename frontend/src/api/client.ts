@@ -334,6 +334,10 @@ export const registerWithPoses = (formData: FormData): Promise<PoseRegisterRespo
 export const addFacePoses = (faceId: number, formData: FormData): Promise<PoseRegisterResponse> =>
   api.post<PoseRegisterResponse>(`/api/v1/pose/faces/${faceId}/poses`, formData, MULTIPART).then((r) => r.data);
 
+/** Re-register an existing profile: its poses are replaced by these photos. */
+export const replaceFacePoses = (faceId: number, formData: FormData): Promise<PoseRegisterResponse> =>
+  api.put<PoseRegisterResponse>(`/api/v1/pose/faces/${faceId}/poses`, formData, MULTIPART).then((r) => r.data);
+
 export const poseSearch = (formData: FormData): Promise<PoseSearchResponse> =>
   api.post<PoseSearchResponse>('/api/v1/pose/search', formData, MULTIPART).then((r) => r.data);
 
