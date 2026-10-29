@@ -144,13 +144,14 @@ def _face_row(session, name="Jane Doe"):
 
 
 def test_add_poses_to_existing_profile(client, auth_headers, session):
+    from app.core.config import settings
+
     _face_row(session)
     uploads = [_png("right.png", 10), _png("up.png", 20)]
     with patch("app.api.routes.pose.embed_with_pose",
                _embed_by_image(uploads, [_accepted(30), _accepted(0, 25)])), \
-         patch("app.api.routes.pose.count_poses", AsyncMock(return_value=3)), \
-         patch("app.api.routes.pose.add_poses", AsyncMock(return_value=[7, 8])) as add, \
-         patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=1)):
+         patch("app.api.routes.pose.add_poses", AsyncMock(return_value=([7, 8], []))) as add, \
+         patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=1)) as audit:
         response = client.post(
             "/api/v1/pose/faces/12/poses", headers=auth_headers, files=uploads,
         )
@@ -159,23 +160,32 @@ def test_add_poses_to_existing_profile(client, auth_headers, session):
     body = response.json()
     assert body["status"] == "POSES_ADDED" and body["profileId"] == 12
     assert body["poseBuckets"] == ["frontal_up", "right_3q"]
+    assert [i["poseId"] for i in body["images"]] == [7, 8]
     assert add.call_args.args[1] == 12
+    assert add.call_args.kwargs["max_poses"] == settings.pose_max_per_face
+    assert [c.kwargs["event_type"] for c in audit.call_args_list] == ["REGISTER_POSES"]
 
 
-def test_add_poses_respects_per_face_limit(client, auth_headers, session):
-    from app.core.config import settings
-
+def test_add_poses_to_a_full_profile_drops_the_oldest(client, auth_headers, session):
     _face_row(session)
-    with patch("app.api.routes.pose.embed_with_pose", side_effect=[_accepted(30)]), \
-         patch("app.api.routes.pose.count_poses",
-               AsyncMock(return_value=settings.pose_max_per_face)), \
-         patch("app.api.routes.pose.add_poses", AsyncMock()) as add:
+    uploads = [_png("a.png", 10), _png("b.png", 20)]
+    # The database layer reports the two oldest poses it deleted to stay at the limit.
+    with patch("app.api.routes.pose.embed_with_pose",
+               _embed_by_image(uploads, [_accepted(30), _accepted(-30)])), \
+         patch("app.api.routes.pose.add_poses", AsyncMock(return_value=([41, 42], [1, 2]))), \
+         patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=1)) as audit:
         response = client.post(
-            "/api/v1/pose/faces/12/poses", headers=auth_headers, files=[_png("a.png")],
+            "/api/v1/pose/faces/12/poses", headers=auth_headers, files=uploads,
         )
 
-    assert response.status_code == 400
-    add.assert_not_awaited()
+    # Same response as any add: the app needs no change.
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "POSES_ADDED" and body["accepted"] == 2
+    assert [i["poseId"] for i in body["images"]] == [41, 42]
+    assert [c.kwargs["event_type"] for c in audit.call_args_list] == [
+        "REGISTER_POSES", "REGISTER_POSES_DROP_OLDEST",
+    ]
 
 
 def test_add_poses_unknown_face(client, auth_headers, session):
@@ -192,8 +202,10 @@ def test_replace_poses_re_registers_a_full_profile(client, auth_headers, session
     left, frontal = _accepted(-35, fill=0.1), _accepted(3, fill=0.3)
     left.embedding[:256] = -0.1
     uploads = [_png("left.png", 10), _png("front.png", 20), _png("blank.png", 30)]
-    # The face already holds the maximum: replacing must not count old poses.
-    with patch("app.api.routes.pose.embed_with_pose", _embed_by_image(uploads, [left, frontal, None])),          patch("app.api.routes.pose.count_poses", AsyncMock(return_value=20)) as count,          patch("app.api.routes.pose.add_poses", AsyncMock()) as add,          patch("app.api.routes.pose.replace_poses", AsyncMock(return_value=[7, 8])) as replace,          patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=1)) as audit:
+    with patch("app.api.routes.pose.embed_with_pose", _embed_by_image(uploads, [left, frontal, None])), \
+         patch("app.api.routes.pose.add_poses", AsyncMock()) as add, \
+         patch("app.api.routes.pose.replace_poses", AsyncMock(return_value=[7, 8])) as replace, \
+         patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=1)) as audit:
         response = client.put(
             "/api/v1/pose/faces/12/poses", headers=auth_headers,
             data={"tenant_id": 7}, files=uploads,
@@ -204,7 +216,6 @@ def test_replace_poses_re_registers_a_full_profile(client, auth_headers, session
     assert body["status"] == "POSES_REPLACED" and body["profileId"] == 12
     assert (body["accepted"], body["rejected"]) == (2, 1)
     assert [i["poseId"] for i in body["images"]] == [7, 8, None]
-    count.assert_not_awaited()
     add.assert_not_awaited()
 
     args, kwargs = replace.call_args
@@ -219,7 +230,8 @@ def test_replace_poses_re_registers_a_full_profile(client, auth_headers, session
 def test_replace_poses_keeps_old_poses_when_no_image_is_usable(client, auth_headers, session):
     _face_row(session)
     uploads = [_png("a.png", 10), _png("b.png", 20)]
-    with patch("app.api.routes.pose.embed_with_pose", _embed_by_image(uploads, [_rejected(85), None])),          patch("app.api.routes.pose.replace_poses", AsyncMock()) as replace:
+    with patch("app.api.routes.pose.embed_with_pose", _embed_by_image(uploads, [_rejected(85), None])), \
+         patch("app.api.routes.pose.replace_poses", AsyncMock()) as replace:
         response = client.put("/api/v1/pose/faces/12/poses", headers=auth_headers, files=uploads)
 
     assert response.status_code == 422
@@ -236,7 +248,9 @@ def test_replace_poses_unknown_face(client, auth_headers, session):
 
 def test_replace_poses_face_deleted_meanwhile(client, auth_headers, session):
     _face_row(session)
-    with patch("app.api.routes.pose.embed_with_pose", side_effect=[_accepted(0)]),          patch("app.api.routes.pose.replace_poses", AsyncMock(return_value=None)),          patch("app.api.routes.pose.add_audit_entry", AsyncMock()) as audit:
+    with patch("app.api.routes.pose.embed_with_pose", side_effect=[_accepted(0)]), \
+         patch("app.api.routes.pose.replace_poses", AsyncMock(return_value=None)), \
+         patch("app.api.routes.pose.add_audit_entry", AsyncMock()) as audit:
         response = client.put("/api/v1/pose/faces/12/poses", headers=auth_headers, files=[_png("a.png")])
     assert response.status_code == 404
     audit.assert_not_awaited()

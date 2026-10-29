@@ -113,18 +113,59 @@ async def add_poses(
     face_id: int,
     poses: list[tuple[np.ndarray, HeadPose, float]],
     tenant_id: int = 1,
-) -> list[int]:
-    """Attach pose embeddings to an existing profile in one transaction."""
+    max_poses: Optional[int] = None,
+) -> tuple[list[int], list[int]]:
+    """
+    Attach pose embeddings to an existing profile in one transaction.
+
+    With ``max_poses``, the profile's oldest poses are then deleted so it
+    keeps at most that many, the new ones included.
+
+    Returns (new pose ids, deleted pose ids).
+    """
+    params = {"face_id": face_id, "tenant_id": tenant_id}
     try:
+        if max_poses is not None:
+            # Lock the profile so concurrent adds to one face trim in turn
+            # and the limit holds.
+            await session.execute(
+                text(
+                    """
+                    SELECT id FROM face_profiles
+                    WHERE id = :face_id AND tenant_id = :tenant_id
+                    FOR UPDATE
+                    """
+                ),
+                params,
+            )
         pose_ids = [
             await _insert_pose(session, face_id, emb, pose, quality, tenant_id)
             for emb, pose, quality in poses
         ]
+        deleted: list[int] = []
+        if max_poses is not None:
+            result = await session.execute(
+                text(
+                    """
+                    DELETE FROM face_pose_embeddings
+                    WHERE face_id = :face_id AND tenant_id = :tenant_id
+                      AND id NOT IN (
+                          SELECT id FROM face_pose_embeddings
+                          WHERE face_id = :face_id AND tenant_id = :tenant_id
+                          ORDER BY id DESC
+                          LIMIT :keep
+                      )
+                    RETURNING id
+                    """
+                ),
+                {**params, "keep": max_poses},
+            )
+            deleted = sorted(int(row[0]) for row in result)
         await session.commit()
     except Exception:
         await session.rollback()
         raise
-    return pose_ids
+    return pose_ids, deleted
 
 
 async def replace_poses(
@@ -189,19 +230,6 @@ async def replace_poses(
         await session.rollback()
         raise
     return pose_ids
-
-
-async def count_poses(session, face_id: int, tenant_id: int = 1) -> int:
-    result = await session.execute(
-        text(
-            """
-            SELECT COUNT(*) FROM face_pose_embeddings
-            WHERE face_id = :face_id AND tenant_id = :tenant_id
-            """
-        ),
-        {"face_id": face_id, "tenant_id": tenant_id},
-    )
-    return int(result.scalar_one())
 
 
 async def list_poses(session, face_id: int, tenant_id: int = 1) -> list[dict]:

@@ -70,12 +70,28 @@ class TestRegisterProfileWithPoses:
         session.commit.assert_not_awaited()
 
 
-class TestAddAndCountPoses:
+class TestAddPoses:
     async def test_add_poses_to_existing_profile(self):
         session = AsyncMock()
         session.execute.side_effect = _returning(201, 202)
-        assert await pose_ops.add_poses(session, 6, [LEFT, FRONT], tenant_id=3) == [201, 202]
+        assert await pose_ops.add_poses(session, 6, [LEFT, FRONT], tenant_id=3) == ([201, 202], [])
         assert all(c.args[1]["tenant_id"] == 3 for c in session.execute.await_args_list)
+        session.commit.assert_awaited_once()
+
+    async def test_max_poses_locks_the_profile_and_drops_the_oldest(self):
+        session = AsyncMock()
+        session.execute.side_effect = [MagicMock(), *_returning(201, 202), _rows([(3,), (1,)])]
+
+        pose_ids, dropped = await pose_ops.add_poses(session, 6, [LEFT, FRONT], tenant_id=3, max_poses=20)
+
+        assert (pose_ids, dropped) == ([201, 202], [1, 3])
+        calls = session.execute.await_args_list
+        lock_sql, lock_params = calls[0].args
+        assert "FOR UPDATE" in str(lock_sql) and lock_params == {"face_id": 6, "tenant_id": 3}
+        trim_sql, trim_params = calls[-1].args
+        assert "DELETE FROM face_pose_embeddings" in str(trim_sql)
+        assert "ORDER BY id DESC" in str(trim_sql)  # the newest are kept
+        assert trim_params == {"face_id": 6, "tenant_id": 3, "keep": 20}
         session.commit.assert_awaited_once()
 
     async def test_add_poses_failure_rolls_back(self):
@@ -84,12 +100,6 @@ class TestAddAndCountPoses:
         with pytest.raises(RuntimeError):
             await pose_ops.add_poses(session, 6, [LEFT])
         session.rollback.assert_awaited_once()
-
-    async def test_count_poses(self):
-        session = AsyncMock()
-        session.execute.return_value = SimpleNamespace(scalar_one=lambda: 3)
-        assert await pose_ops.count_poses(session, 6, tenant_id=2) == 3
-        assert session.execute.await_args.args[1] == {"face_id": 6, "tenant_id": 2}
 
 
 class TestReplacePoses:

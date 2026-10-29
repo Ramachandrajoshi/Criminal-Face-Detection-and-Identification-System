@@ -5,7 +5,7 @@ sideways, up or down rather than looking straight at the camera.
 Endpoints
 ---------
 POST   /api/v1/pose/register                      new profile from 1–10 photos at different angles
-POST   /api/v1/pose/faces/{face_id}/poses         add angle photos to an existing profile
+POST   /api/v1/pose/faces/{face_id}/poses         add angle photos to an existing profile (oldest dropped past the limit)
 PUT    /api/v1/pose/faces/{face_id}/poses         re-register: replace all of a profile's poses
 GET    /api/v1/pose/faces/{face_id}/poses         list a profile's enrolled poses
 DELETE /api/v1/pose/faces/{face_id}/poses/{pid}   remove one pose
@@ -45,7 +45,6 @@ from app.core.pose_pipeline import PoseEmbedding, embed_with_pose, estimate_fram
 from app.db.models import FaceProfile as FaceProfileModel
 from app.db.pose_ops import (
     add_poses,
-    count_poses,
     delete_pose,
     list_poses,
     pose_ann_query,
@@ -258,8 +257,9 @@ async def add_face_poses(
     through the standard ``/register`` endpoint. The profile's main embedding
     is not changed, so the standard ``/search`` behaves exactly as before.
 
-    The poses already stored are kept, so a profile fills up after
-    POSE_MAX_PER_FACE photos. To enrol the same person again, use ``PUT``.
+    A profile keeps its newest POSE_MAX_PER_FACE poses: once it is full, each
+    new photo replaces the oldest one, so re-registering through this endpoint
+    never runs into the limit. ``PUT`` replaces all poses at once instead.
     """
     face_name = await _require_face(session, face_id, tenant_id)
 
@@ -267,19 +267,18 @@ async def add_face_poses(
     accepted = _accepted(embedded)
     if not accepted:
         raise HTTPException(status_code=422, detail=_rejection_detail(embedded))
-
-    existing = await count_poses(session, face_id, tenant_id=tenant_id)
-    if existing + len(accepted) > settings.pose_max_per_face:
+    if len(accepted) > settings.pose_max_per_face:
         raise HTTPException(
             status_code=400,
-            detail=(
-                f"Face {face_id} has {existing} poses; adding {len(accepted)} would "
-                f"exceed the limit of {settings.pose_max_per_face}"
-            ),
+            detail=f"A face can hold at most {settings.pose_max_per_face} poses",
         )
 
-    pose_ids = await add_poses(
-        session, face_id, [(r.embedding, r.pose, r.quality) for r in accepted], tenant_id=tenant_id
+    pose_ids, dropped = await add_poses(
+        session,
+        face_id,
+        [(r.embedding, r.pose, r.quality) for r in accepted],
+        tenant_id=tenant_id,
+        max_poses=settings.pose_max_per_face,
     )
 
     await add_audit_entry(
@@ -289,6 +288,13 @@ async def add_face_poses(
         result_name=face_name,
         tenant_id=tenant_id,
     )
+    if dropped:
+        await add_audit_entry(
+            session,
+            event_type="REGISTER_POSES_DROP_OLDEST",
+            query_hash=compute_query_hash(f"{face_id}:{','.join(map(str, dropped))}".encode()),
+            tenant_id=tenant_id,
+        )
 
     return PoseRegisterResponse(
         status="POSES_ADDED",
