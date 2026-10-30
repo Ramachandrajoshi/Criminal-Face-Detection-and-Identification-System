@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 
-from app.core.config import INSIGHTFACE_EMBEDDING_VERSION
+from app.core.config import ADAFACE_EMBEDDING_VERSION, INSIGHTFACE_EMBEDDING_VERSION
 from app.core.crypto import decrypt_embedding_bytes
 from app.core.pose import HeadPose
 from app.db import pose_ops, vector_ops
@@ -35,6 +35,7 @@ def _rows(rows, fetchone=None):
 
 LEFT = (_unit(1), HeadPose(yaw=-31.234, pitch=4.567, roll=1.0), 0.81234)
 FRONT = (_unit(2), HeadPose(yaw=2.0, pitch=-1.0, roll=0.0), 0.95)
+V4 = {"embedding_version": INSIGHTFACE_EMBEDDING_VERSION}
 
 
 class TestRegisterProfileWithPoses:
@@ -44,7 +45,7 @@ class TestRegisterProfileWithPoses:
         template = _unit(3)
 
         profile_id, pose_ids = await pose_ops.register_profile_with_poses(
-            session, "Jane Doe", "JD", {"gender": "F"}, template, [LEFT, FRONT], tenant_id=2,
+            session, "Jane Doe", "JD", {"gender": "F"}, template, [LEFT, FRONT], tenant_id=2, **V4,
         )
 
         assert (profile_id, pose_ids) == (6, [101, 102])
@@ -58,14 +59,26 @@ class TestRegisterProfileWithPoses:
         pose_params = session.execute.await_args_list[1].args[1]
         assert (pose_params["face_id"], pose_params["pose_bucket"]) == (6, LEFT[1].bucket)
         assert (pose_params["yaw"], pose_params["pitch"], pose_params["quality"]) == (-31.23, 4.57, 0.8123)
+        assert pose_params["embedding_version"] == INSIGHTFACE_EMBEDDING_VERSION
         session.commit.assert_awaited_once()
         session.rollback.assert_not_awaited()
+
+    async def test_version_5_profile_and_poses(self):
+        session = AsyncMock()
+        session.execute.side_effect = _returning(6, 101, 102)
+
+        await pose_ops.register_profile_with_poses(
+            session, "Jane Doe", None, None, _unit(3), [LEFT, FRONT],
+            embedding_version=ADAFACE_EMBEDDING_VERSION,
+        )
+
+        assert [c.args[1]["embedding_version"] for c in session.execute.await_args_list] == [5, 5, 5]
 
     async def test_failure_rolls_back_and_reraises(self):
         session = AsyncMock()
         session.execute.side_effect = [*_returning(6), RuntimeError("unique violation")]
         with pytest.raises(RuntimeError):
-            await pose_ops.register_profile_with_poses(session, "Jane", None, None, _unit(3), [LEFT])
+            await pose_ops.register_profile_with_poses(session, "Jane", None, None, _unit(3), [LEFT], **V4)
         session.rollback.assert_awaited_once()
         session.commit.assert_not_awaited()
 
@@ -74,15 +87,27 @@ class TestAddPoses:
     async def test_add_poses_to_existing_profile(self):
         session = AsyncMock()
         session.execute.side_effect = _returning(201, 202)
-        assert await pose_ops.add_poses(session, 6, [LEFT, FRONT], tenant_id=3) == ([201, 202], [])
+        assert await pose_ops.add_poses(session, 6, [LEFT, FRONT], tenant_id=3, **V4) == ([201, 202], [])
         assert all(c.args[1]["tenant_id"] == 3 for c in session.execute.await_args_list)
+        assert all(c.args[1]["embedding_version"] == 4 for c in session.execute.await_args_list)
         session.commit.assert_awaited_once()
+
+    async def test_version_5_poses_go_next_to_older_ones(self):
+        session = AsyncMock()
+        session.execute.side_effect = [MagicMock(), *_returning(201), _rows([(1,)])]
+
+        await pose_ops.add_poses(session, 6, [LEFT], max_poses=20, embedding_version=ADAFACE_EMBEDDING_VERSION)
+
+        calls = session.execute.await_args_list
+        assert calls[1].args[1]["embedding_version"] == 5
+        # The limit counts every pose of the face, whatever its version.
+        assert "embedding_version" not in str(calls[-1].args[0])
 
     async def test_max_poses_locks_the_profile_and_drops_the_oldest(self):
         session = AsyncMock()
         session.execute.side_effect = [MagicMock(), *_returning(201, 202), _rows([(3,), (1,)])]
 
-        pose_ids, dropped = await pose_ops.add_poses(session, 6, [LEFT, FRONT], tenant_id=3, max_poses=20)
+        pose_ids, dropped = await pose_ops.add_poses(session, 6, [LEFT, FRONT], tenant_id=3, max_poses=20, **V4)
 
         assert (pose_ids, dropped) == ([201, 202], [1, 3])
         calls = session.execute.await_args_list
@@ -98,7 +123,7 @@ class TestAddPoses:
         session = AsyncMock()
         session.execute.side_effect = RuntimeError("fk violation")
         with pytest.raises(RuntimeError):
-            await pose_ops.add_poses(session, 6, [LEFT])
+            await pose_ops.add_poses(session, 6, [LEFT], **V4)
         session.rollback.assert_awaited_once()
 
 
@@ -108,7 +133,7 @@ class TestReplacePoses:
         session.execute.side_effect = [_rows([], fetchone=(6,)), MagicMock(), *_returning(301, 302)]
         template = _unit(3)
 
-        pose_ids = await pose_ops.replace_poses(session, 6, template, [LEFT, FRONT], tenant_id=2)
+        pose_ids = await pose_ops.replace_poses(session, 6, template, [LEFT, FRONT], tenant_id=2, **V4)
 
         assert pose_ids == [301, 302]
         calls = session.execute.await_args_list
@@ -125,11 +150,23 @@ class TestReplacePoses:
         session.commit.assert_awaited_once()
         session.rollback.assert_not_awaited()
 
+    async def test_re_registering_under_version_5_moves_profile_and_poses(self):
+        session = AsyncMock()
+        session.execute.side_effect = [_rows([], fetchone=(6,)), MagicMock(), *_returning(301)]
+
+        await pose_ops.replace_poses(session, 6, _unit(3), [LEFT], embedding_version=ADAFACE_EMBEDDING_VERSION)
+
+        calls = session.execute.await_args_list
+        assert calls[0].args[1]["embedding_version"] == 5
+        # Old poses of every version are deleted.
+        assert "embedding_version" not in str(calls[1].args[0])
+        assert calls[2].args[1]["embedding_version"] == 5
+
     async def test_unknown_profile_changes_nothing(self):
         session = AsyncMock()
         session.execute.return_value = _rows([], fetchone=None)
 
-        assert await pose_ops.replace_poses(session, 99, _unit(3), [LEFT]) is None
+        assert await pose_ops.replace_poses(session, 99, _unit(3), [LEFT], **V4) is None
 
         assert session.execute.await_count == 1  # no DELETE or INSERT
         session.rollback.assert_awaited_once()
@@ -139,7 +176,7 @@ class TestReplacePoses:
         session = AsyncMock()
         session.execute.side_effect = [_rows([], fetchone=(6,)), MagicMock(), RuntimeError("lost connection")]
         with pytest.raises(RuntimeError):
-            await pose_ops.replace_poses(session, 6, _unit(3), [LEFT])
+            await pose_ops.replace_poses(session, 6, _unit(3), [LEFT], **V4)
         session.rollback.assert_awaited_once()
         session.commit.assert_not_awaited()
 
@@ -185,7 +222,7 @@ class TestPoseAnnQuery:
             (9, "John Roe", None, 0.41, "frontal", None, None),
         ])
 
-        matches = await pose_ops.pose_ann_query(session, _unit(4), threshold=0.6, limit=5, tenant_id=2)
+        matches = await pose_ops.pose_ann_query(session, _unit(4), threshold=0.6, limit=5, tenant_id=2, **V4)
 
         assert matches[0] == {"id": 6, "face_name": "Jane Doe", "alias": "JD", "distance": 0.312346,
                               "matched_pose": "left", "matched_yaw": -30.0, "matched_pitch": 2.0, "tenant_id": 2}
@@ -194,6 +231,24 @@ class TestPoseAnnQuery:
         assert "DISTINCT ON (p.face_id)" in str(sql)
         assert (params["threshold"], params["limit"], params["tenant_id"]) == (0.6, 5, 2)
         assert params["embedding_version"] == INSIGHTFACE_EMBEDDING_VERSION
+
+    async def test_compares_only_the_querys_version(self):
+        session = AsyncMock()
+        session.execute.return_value = _rows([])
+        await pose_ops.pose_ann_query(session, _unit(4), threshold=0.6, embedding_version=ADAFACE_EMBEDDING_VERSION)
+        sql, params = session.execute.await_args.args
+        assert "p.embedding_version = :embedding_version" in str(sql)
+        assert params["embedding_version"] == 5
+
+    async def test_present_versions_are_per_tenant(self):
+        session = AsyncMock()
+        session.execute.return_value = _rows([(4,), (5,), (None,)])
+
+        assert await pose_ops.get_present_pose_versions(session, tenant_id=3) == {4, 5}
+
+        sql, params = session.execute.await_args.args
+        assert "DISTINCT embedding_version" in str(sql) and "FROM face_pose_embeddings" in str(sql)
+        assert params == {"tenant_id": 3}
 
 
 class TestVectorOpsWrites:

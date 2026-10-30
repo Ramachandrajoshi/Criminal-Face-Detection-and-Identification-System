@@ -1,11 +1,13 @@
 """
-Head-pose estimation from the 5 SCRFD landmarks.
+Head-pose estimation from the 5 detector landmarks (SCRFD for version 4,
+YOLOv5-Face for version 5).
 
-The InsightFace detector already returns left eye, right eye, nose tip and the
-two mouth corners for every face, so pose costs nothing extra to compute. The
-estimate is approximate (roughly ±10–15°), which is enough to bucket a face as
+Both detectors already return left eye, right eye, nose tip and the two mouth
+corners for every face, so pose costs nothing extra to compute. The estimate
+is approximate (roughly ±10–15°), which is enough to bucket a face as
 frontal / three-quarter / profile and to reject faces turned too far to embed
-reliably. It is not a substitute for a 3D landmark model.
+reliably. It is not a substitute for a 3D landmark model. The two detectors'
+estimates differ by 2–5° of yaw on average, with no systematic offset.
 
 Geometry
 --------
@@ -55,7 +57,7 @@ class HeadPose:
 
 
 def estimate_pose(landmarks: np.ndarray) -> HeadPose:
-    """Estimate yaw / pitch / roll from (5, 2) SCRFD landmarks in pixels."""
+    """Estimate yaw / pitch / roll from (5, 2) detector landmarks in pixels."""
     pts = np.asarray(landmarks, dtype=np.float64).reshape(5, 2)
     left_eye, right_eye, nose, mouth_left, mouth_right = pts
 

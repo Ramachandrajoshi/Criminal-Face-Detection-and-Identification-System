@@ -207,7 +207,11 @@ Detector backends in priority order: `retinaface` → `mtcnn` → `opencv`
 (DeepFace, embedding versions 1–3). Version 4 uses SCRFD-10G from the same
 `buffalo_l` pack; version 5 uses YOLOv5-Face M (ONNX, fixed 640 input; a larger pass runs as
 overlapping 640 px tiles).
-The `/api/v1/pose/*` endpoints always use version 4.
+The `/api/v1/pose/*` endpoints need an ONNX engine's 5 landmarks for the head pose:
+new poses use version 5 when `EMBEDDING_VERSION=5`, otherwise version 4
+(`POSE_EMBEDDING_VERSION`), and pose search embeds the query once per version
+that has poses for the tenant, like the main search. Head pose from the two
+detectors agrees to 2–5° of yaw on average (`testdata/scripts/adhoc/pose_agreement.py`).
 
 ### Embedding versions
 

@@ -24,6 +24,9 @@ SUPPORTED_EMBEDDING_VERSIONS = (5, 4, 3, 2, 1)
 DEEPFACE_EMBEDDING_VERSIONS = (3, 2, 1)
 INSIGHTFACE_EMBEDDING_VERSION = 4
 ADAFACE_EMBEDDING_VERSION = 5
+# Versions the /pose endpoints can embed under: they estimate head pose from
+# the 5 landmarks of an ONNX engine's detector.
+POSE_EMBEDDING_VERSIONS = (ADAFACE_EMBEDDING_VERSION, INSIGHTFACE_EMBEDDING_VERSION)
 
 assert set(SUPPORTED_EMBEDDING_VERSIONS) == {
     *DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION, ADAFACE_EMBEDDING_VERSION,
@@ -82,7 +85,8 @@ class Settings(BaseSettings):
     adaface_det_threshold: float = 0.5
 
     # --- Pose-aware enrollment & search (/api/v1/pose/*) ---
-    # Always InsightFace (version 4), independent of EMBEDDING_VERSION.
+    # Version 5 when EMBEDDING_VERSION=5, otherwise version 4 (see
+    # POSE_EMBEDDING_VERSION below).
     # Faces turned further than this are rejected: past ~80° yaw the eye and
     # mouth landmarks are guesses and the embedding is not trustworthy.
     pose_max_yaw_deg: float = 80.0
@@ -199,6 +203,13 @@ if settings.embedding_version not in SUPPORTED_EMBEDDING_VERSIONS:
 
 # Recipe used for new enrollments and re-enrollments.
 CURRENT_EMBEDDING_VERSION = settings.embedding_version
+
+# Recipe used for new pose enrollments: the current one when it is an ONNX
+# engine with landmarks, else version 4 (the DeepFace recipes have no pose path).
+POSE_EMBEDDING_VERSION = (
+    CURRENT_EMBEDDING_VERSION if CURRENT_EMBEDDING_VERSION in POSE_EMBEDDING_VERSIONS
+    else INSIGHTFACE_EMBEDDING_VERSION
+)
 
 
 def match_threshold_for_version(version: int) -> float:

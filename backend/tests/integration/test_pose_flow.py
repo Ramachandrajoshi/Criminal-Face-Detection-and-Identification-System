@@ -102,8 +102,9 @@ def test_register_stores_every_usable_pose_and_averages_them_as_primary(
     expected = (left.embedding + frontal.embedding) / 2
     np.testing.assert_allclose(args[4], expected / np.linalg.norm(expected), rtol=1e-6)
     assert len(args[5]) == 2 and kwargs["tenant_id"] == 7
-    # Uploads for enrollment pick the centred face.
-    assert all(call.args[1:] == (True,) for call in stub.call_args_list)
+    # Uploads for enrollment pick the centred face, under the pose version.
+    assert all(call.args[1:] == (True, 4) for call in stub.call_args_list)
+    assert kwargs["embedding_version"] == 4
     assert audit.call_args.kwargs["event_type"] == "REGISTER_POSES"
 
 
@@ -163,6 +164,7 @@ def test_add_poses_to_existing_profile(client, auth_headers, session):
     assert [i["poseId"] for i in body["images"]] == [7, 8]
     assert add.call_args.args[1] == 12
     assert add.call_args.kwargs["max_poses"] == settings.pose_max_per_face
+    assert add.call_args.kwargs["embedding_version"] == 4
     assert [c.kwargs["event_type"] for c in audit.call_args_list] == ["REGISTER_POSES"]
 
 
@@ -219,7 +221,7 @@ def test_replace_poses_re_registers_a_full_profile(client, auth_headers, session
     add.assert_not_awaited()
 
     args, kwargs = replace.call_args
-    assert args[1] == 12 and kwargs["tenant_id"] == 7
+    assert args[1] == 12 and kwargs["tenant_id"] == 7 and kwargs["embedding_version"] == 4
     # Main embedding = normalised average of the new photos, as in /pose/register.
     expected = (left.embedding + frontal.embedding) / 2
     np.testing.assert_allclose(args[2], expected / np.linalg.norm(expected), rtol=1e-6)
@@ -324,7 +326,7 @@ def test_search_match_reports_query_and_matched_pose(client, auth_headers, sessi
     assert body["alertId"] == 66
 
     assert query.call_args.kwargs == {
-        "threshold": settings.match_threshold_insightface, "limit": 5, "tenant_id": 7,
+        "threshold": settings.match_threshold_insightface, "limit": 5, "tenant_id": 7, "embedding_version": 4,
     }
     assert audit.call_args.kwargs["event_type"] == "MATCH"
     assert alert.call_args.kwargs["face_id"] == 41
@@ -354,3 +356,157 @@ def test_search_no_face(client, auth_headers, session):
     body = response.json()
     assert body["status"] == "ERROR" and body["error"] == "No face detected"
     query.assert_not_awaited()
+
+
+# ── Version 5 and tenants with poses of both versions ─────────────
+
+
+def _by_version(results: dict) -> MagicMock:
+    """Stub for embed_with_pose returning ``results[version]``; an exception is raised."""
+    def embed(content, enrollment=False, version=4, enforce_limits=True):
+        result = results[version]
+        if isinstance(result, Exception):
+            raise result
+        return result
+    return MagicMock(side_effect=embed)
+
+
+def test_register_add_and_replace_under_version_5(client, auth_headers, session):
+    _face_row(session)
+    uploads = [_png("front.png", 10)]
+    stub = _embed_by_image(uploads, [_accepted(2)])
+    with patch("app.api.routes.pose.POSE_EMBEDDING_VERSION", 5), \
+         patch("app.api.routes.pose.embed_with_pose", stub), \
+         patch("app.api.routes.pose.register_profile_with_poses", AsyncMock(return_value=(41, [100]))) as store, \
+         patch("app.api.routes.pose.add_poses", AsyncMock(return_value=([101], []))) as add, \
+         patch("app.api.routes.pose.replace_poses", AsyncMock(return_value=[102])) as replace, \
+         patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=1)):
+        assert client.post("/api/v1/pose/register", headers=auth_headers,
+                           data={"face_name": "Jane"}, files=uploads).status_code == 201
+        assert client.post("/api/v1/pose/faces/41/poses", headers=auth_headers, files=uploads).status_code == 201
+        assert client.put("/api/v1/pose/faces/41/poses", headers=auth_headers, files=uploads).status_code == 200
+
+    assert [c.args[1:] for c in stub.call_args_list] == [(True, 5)] * 3
+    for db_call in (store, add, replace):
+        assert db_call.call_args.kwargs["embedding_version"] == 5
+
+
+def _mixed_search(client, auth_headers, results, present, matches_by_version=None):
+    """POST /pose/search with POSE_EMBEDDING_VERSION=5 and ``present`` versions holding poses."""
+    matches_by_version = matches_by_version or {}
+    with patch("app.api.routes.pose.POSE_EMBEDDING_VERSION", 5), \
+         patch("app.api.routes.pose.get_present_pose_versions", AsyncMock(return_value=set(present))), \
+         patch("app.api.routes.pose.embed_with_pose", _by_version(results)) as embed, \
+         patch("app.api.routes.pose.pose_ann_query", AsyncMock(
+             side_effect=lambda s, e, **kw: [dict(m) for m in matches_by_version.get(kw["embedding_version"], [])]
+         )) as query, \
+         patch("app.api.routes.pose.add_audit_entry", AsyncMock(return_value=55)) as audit, \
+         patch("app.api.routes.pose.create_alert", AsyncMock(return_value=66)):
+        response = client.post(
+            "/api/v1/pose/search", headers=auth_headers, params={"limit": 5}, data={"tenant_id": 7},
+            files={"file": ("cctv.png", _png("cctv.png")[1][1], "image/png")},
+        )
+    assert response.status_code == 200, response.text
+    return response.json(), embed, query, audit
+
+
+def _match(face_id, distance):
+    return {"id": face_id, "face_name": f"P{face_id}", "alias": None, "distance": distance,
+            "matched_pose": "frontal", "matched_yaw": 0.0, "matched_pitch": 0.0, "tenant_id": 7}
+
+
+def test_search_compares_each_version_with_its_own_poses_and_merges(client, auth_headers, session):
+    from app.core.config import settings
+    from app.db.vector_ops import compute_query_hash
+
+    v5, v4 = _accepted(-25, fill=0.2), _accepted(-5, fill=0.1)
+    with patch.object(settings, "match_threshold_insightface", 0.5):
+        body, embed, query, audit = _mixed_search(
+            client, auth_headers, {5: v5, 4: v4}, present={4, 5},
+            matches_by_version={
+                5: [_match(41, 0.30), _match(42, 0.50)],
+                # 41 has poses of both versions: 0.28 / 0.5 is worse than 0.30 / 0.6.
+                4: [_match(41, 0.28), _match(43, 0.20)],
+            },
+        )
+
+    assert body["status"] == "MATCH"
+    assert [(m["id"], m["distance"]) for m in body["matches"]] == [(43, 0.20), (41, 0.30), (42, 0.50)]
+    # Pose, threshold and hash come from the configured version (5).
+    assert body["queryPose"]["bucket"] == "left_3q"
+    assert body["matchThreshold"] == settings.match_threshold_adaface
+    assert audit.call_args.kwargs["query_hash"] == compute_query_hash(v5.embedding.tobytes())
+    assert sorted(c.args[1:] for c in embed.call_args_list) == [(False, 4, False), (False, 5, False)]
+    assert [(c.kwargs["embedding_version"], c.kwargs["threshold"]) for c in query.call_args_list] == [
+        (5, settings.match_threshold_adaface), (4, 0.5),
+    ]
+    assert all(c.args[1] is {5: v5, 4: v4}[c.kwargs["embedding_version"]].embedding for c in query.call_args_list)
+
+
+def test_search_only_embeds_versions_with_poses(client, auth_headers, session):
+    body, embed, query, _ = _mixed_search(client, auth_headers, {5: _accepted(0)}, present=set())
+    assert body["status"] == "NO_MATCH"
+    assert [c.args[2] for c in embed.call_args_list] == [5]
+    assert [c.kwargs["embedding_version"] for c in query.call_args_list] == [5]
+
+
+def test_search_uses_the_other_version_when_one_finds_no_face(client, auth_headers, session):
+    body, _, query, _ = _mixed_search(
+        client, auth_headers, {5: None, 4: _accepted(30)}, present={4},
+        matches_by_version={4: [_match(41, 0.31)]},
+    )
+    assert body["status"] == "MATCH" and body["matches"][0]["id"] == 41
+    assert body["queryPose"]["bucket"] == "right_3q"
+    assert [c.kwargs["embedding_version"] for c in query.call_args_list] == [4]
+
+
+def test_search_pose_limits_are_decided_by_the_configured_version(client, auth_headers, session):
+    body, _, query, audit = _mixed_search(
+        client, auth_headers, {5: _rejected(85), 4: _accepted(70)}, present={4, 5},
+    )
+    assert body["status"] == "LOW_QUALITY" and body["queryPose"]["bucket"] == "right_profile"
+    query.assert_not_awaited()
+    assert audit.call_args.kwargs["event_type"] == "LOW_QUALITY"
+
+
+@pytest.mark.parametrize("v5_matches, status", [([], "ERROR"), ([_match(41, 0.2)], "MATCH")])
+def test_search_with_a_version_that_failed(client, auth_headers, session, v5_matches, status):
+    """Poses of a version that could not be embedded were not compared: not a clean NO_MATCH."""
+    body, _, query, _ = _mixed_search(
+        client, auth_headers, {5: _accepted(0), 4: RuntimeError("CUDA error")}, present={4, 5},
+        matches_by_version={5: v5_matches},
+    )
+    assert body["status"] == status
+    if status == "ERROR":
+        assert body["error"] == "Embedding extraction failed"
+    assert [c.kwargs["embedding_version"] for c in query.call_args_list] == [5]
+
+
+@pytest.mark.parametrize("results, error", [
+    ({5: None, 4: None}, "No face detected"),
+    ({5: RuntimeError("missing weights"), 4: None}, "Embedding extraction failed"),
+])
+def test_search_without_a_face_in_any_version(client, auth_headers, session, results, error):
+    body, _, query, _ = _mixed_search(client, auth_headers, results, present={4})
+    assert body["status"] == "ERROR" and body["error"] == error and body["queryPose"] is None
+    query.assert_not_awaited()
+
+
+def test_search_debug_dump_lists_nearest_poses_of_every_version(client, auth_headers, session):
+    import contextlib
+
+    from app.core.config import settings
+
+    notes = MagicMock()
+    with patch.object(settings, "debug_face_dump", True), \
+         patch("app.api.routes.pose.face_dump", lambda *a: contextlib.nullcontext()), \
+         patch("app.api.routes.pose.dump_note", notes):
+        body, _, query, _ = _mixed_search(
+            client, auth_headers, {5: _accepted(0), 4: _accepted(0)}, present={4, 5},
+            matches_by_version={5: [_match(41, 0.7)], 4: [_match(42, 0.9)]},
+        )
+
+    assert body["status"] == "MATCH"   # the stub ignores the threshold
+    nearest = dict((c.args[0], c.args[1]) for c in notes.call_args_list)["nearest_ignoring_threshold"]
+    assert nearest == [{"version": 5, "face_id": 41, "distance": 0.7}, {"version": 4, "face_id": 42, "distance": 0.9}]
+    assert {c.kwargs["threshold"] for c in query.call_args_list[2:]} == {2.0}

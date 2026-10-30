@@ -136,7 +136,7 @@ async def test_pose_ann_query_is_one_statement_grouped_per_face():
     session.execute.return_value = [(5, "Jane", None, 0.21, "left_3q", -31.0, 2.0)]
 
     matches = await pose_ann_query(
-        session, np.full(512, 0.5, np.float32), threshold=0.6, limit=3, tenant_id=7
+        session, np.full(512, 0.5, np.float32), threshold=0.6, limit=3, tenant_id=7, embedding_version=4
     )
 
     session.execute.assert_awaited_once()
@@ -213,3 +213,68 @@ def test_embed_with_pose_embeds_an_accepted_pose(monkeypatch):
     assert result.accepted and result.embedding is embedding
     assert result.pose.bucket == pose_bucket(result.pose.yaw, result.pose.pitch)
     assert engine.detect_primary.call_args.kwargs["prefer_center"] is True
+
+
+def test_pose_version_follows_embedding_version_for_onnx_engines():
+    """New poses use version 5 when EMBEDDING_VERSION=5, otherwise version 4."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    for env_version, pose_version in (("3", "4"), ("4", "4"), ("5", "5")):
+        proc = subprocess.run(
+            [sys.executable, "-c", "import app.core.config as c; print(c.POSE_EMBEDDING_VERSION)"],
+            env={**os.environ, "EMBEDDING_VERSION": env_version}, capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parents[2]),
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == pose_version
+
+
+def test_embed_with_pose_version_5_uses_the_adaface_engine(monkeypatch):
+    from app.core import adaface_engine, face_engine, pose_pipeline
+    from app.core.face_engine import DetectedFace
+
+    embedding = np.full(512, 1 / np.sqrt(512), np.float32)
+    engine = _engine_with(DetectedFace(np.array([100.0, 100, 300, 300]), 0.91, _project(yaw=40)), embedding)
+    monkeypatch.setattr(adaface_engine, "get_engine", lambda: engine)
+    monkeypatch.setattr(face_engine, "get_engine", lambda: pytest.fail("version 4 engine used"))
+    detections, stages = [], []
+    monkeypatch.setattr(pose_pipeline, "dump_detection", lambda tag, *a, **k: detections.append((tag, k["label"])))
+    monkeypatch.setattr(pose_pipeline, "dump_stage", lambda tag, *a, **k: stages.append(tag))
+
+    result = pose_pipeline.embed_with_pose(_png(), False, 5)
+
+    assert result.accepted and result.embedding is embedding
+    assert result.pose.bucket == "right_3q"
+    assert detections[0][0] == "pose_v5_01_detect" and detections[0][1].startswith("yolov5face")
+    assert stages == ["pose_v5_02_aligned_112"]
+
+
+def test_frame_pose_version_5_uses_the_adaface_engine(monkeypatch):
+    from app.core import adaface_engine, pose_pipeline
+    from app.core.face_engine import DetectedFace
+
+    engine = _engine_with(DetectedFace(np.array([64.0, 48, 320, 432]), 0.8, _project(yaw=-20)))
+    monkeypatch.setattr(adaface_engine, "get_engine", lambda: engine)
+
+    estimate = pose_pipeline.estimate_frame_pose(_png(), 5)
+
+    assert estimate.bbox == (0.1, 0.1, 0.5, 0.9)
+    assert estimate.pose.bucket == "left_3q"
+
+
+def test_embed_with_pose_can_embed_beyond_the_limits(monkeypatch):
+    """A search embeds under every version and lets one decide on the pose."""
+    from app.core import face_engine, pose_pipeline
+    from app.core.face_engine import DetectedFace
+
+    embedding = np.full(512, 1 / np.sqrt(512), np.float32)
+    engine = _engine_with(DetectedFace(np.array([0, 0, 100, 100.0]), 0.9, _project(yaw=88)), embedding)
+    monkeypatch.setattr(face_engine, "get_engine", lambda: engine)
+
+    result = pose_pipeline.embed_with_pose(_png(), False, 4, enforce_limits=False)
+
+    assert not result.accepted and "yaw" in result.rejected_reason
+    assert result.embedding is embedding

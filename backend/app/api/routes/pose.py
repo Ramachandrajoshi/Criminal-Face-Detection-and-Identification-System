@@ -13,15 +13,18 @@ POST   /api/v1/pose/search                        match a frame against every en
 POST   /api/v1/pose/estimate                      head pose of a frame only (webcam guidance)
 
 These are additive: the existing /register, /search and /faces endpoints are
-unchanged. Everything here runs on the InsightFace engine (embedding version
-4) whatever EMBEDDING_VERSION is set to.
+unchanged. New poses are embedded under POSE_EMBEDDING_VERSION: version 5
+(YOLOv5-Face + AdaFace) when EMBEDDING_VERSION=5, otherwise version 4
+(InsightFace). Search embeds the query once per version that has poses for
+the tenant, so poses enrolled under the other version keep matching until the
+face is re-registered.
 
 How matching works
 ------------------
 Each photo is tagged with an estimated head pose (yaw / pitch / roll from the
 detector's 5 landmarks) and stored as its own embedding. Search compares the
-query with all of them in a single SQL statement and keeps each person's
-closest pose. Frames turned beyond POSE_MAX_YAW_DEG / POSE_MAX_PITCH_DEG
+query with all of them in a single SQL statement per version and keeps each
+person's closest pose. Frames turned beyond POSE_MAX_YAW_DEG / POSE_MAX_PITCH_DEG
 return LOW_QUALITY instead of a guess.
 """
 
@@ -38,7 +41,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.register import _validate_file
 from app.core.auth import get_current_user
-from app.core.config import INSIGHTFACE_EMBEDDING_VERSION, match_threshold_for_version, settings
+from app.core.config import (
+    POSE_EMBEDDING_VERSION,
+    POSE_EMBEDDING_VERSIONS,
+    match_threshold_for_version,
+    settings,
+)
 from app.core.debug_dump import dump_note, face_dump
 from app.core.inference_executor import run_inference
 from app.core.pose_pipeline import PoseEmbedding, embed_with_pose, estimate_frame_pose
@@ -46,6 +54,7 @@ from app.db.models import FaceProfile as FaceProfileModel
 from app.db.pose_ops import (
     add_poses,
     delete_pose,
+    get_present_pose_versions,
     list_poses,
     pose_ann_query,
     register_profile_with_poses,
@@ -91,7 +100,7 @@ async def _embed_upload(file: UploadFile) -> tuple[Optional[PoseEmbedding], Opti
     # One debug dump folder per uploaded angle (no-op unless DEBUG_FACE_DUMP).
     with face_dump("pose_enroll", content):
         try:
-            result = await run_inference(embed_with_pose, content, True)
+            result = await run_inference(embed_with_pose, content, True, POSE_EMBEDDING_VERSION)
         except Exception as exc:  # noqa: BLE001 — engine failure, reported per file
             logger.error("Pose embedding failed for %s: %s", file.filename, exc)
             dump_note("result", {"status": "ERROR", "error": str(exc)})
@@ -175,7 +184,7 @@ async def register_with_poses(
     Register a new face profile from several photos at different head poses.
 
     Every usable photo is stored as its own pose-tagged embedding. Their
-    average becomes the profile's main embedding (version 4), so the person is
+    average becomes the profile's main embedding (POSE_EMBEDDING_VERSION), so the person is
     found by the standard ``/search`` endpoint too. An average of several
     photos matches far better than any single one: on LFW, three averaged
     photos found 99.1% of low-resolution probes at the configured threshold,
@@ -210,6 +219,7 @@ async def register_with_poses(
         template,
         [(r.embedding, r.pose, r.quality) for r in accepted],
         tenant_id=tenant_id,
+        embedding_version=POSE_EMBEDDING_VERSION,
     )
 
     await add_audit_entry(
@@ -279,6 +289,7 @@ async def add_face_poses(
         [(r.embedding, r.pose, r.quality) for r in accepted],
         tenant_id=tenant_id,
         max_poses=settings.pose_max_per_face,
+        embedding_version=POSE_EMBEDDING_VERSION,
     )
 
     await add_audit_entry(
@@ -319,7 +330,7 @@ async def replace_face_poses(
     Re-register a profile: replace all of its poses with these photos.
 
     The old pose embeddings are deleted and the profile's main embedding
-    becomes the average of the new photos (version 4), as with
+    becomes the average of the new photos (POSE_EMBEDDING_VERSION), as with
     ``/pose/register``, so the old photos no longer match in ``/search`` or
     ``/pose/search``. Name, alias and demographics are kept. When no photo is
     usable the request fails with 422 and the profile is left unchanged.
@@ -343,6 +354,7 @@ async def replace_face_poses(
         template,
         [(r.embedding, r.pose, r.quality) for r in accepted],
         tenant_id=tenant_id,
+        embedding_version=POSE_EMBEDDING_VERSION,
     )
     if pose_ids is None:  # deleted while the photos were being embedded
         raise HTTPException(status_code=404, detail="Face not found")
@@ -416,7 +428,7 @@ async def estimate_pose_of_frame(
     if err:
         raise HTTPException(status_code=400, detail=err)
 
-    estimate = await run_inference(estimate_frame_pose, content)
+    estimate = await run_inference(estimate_frame_pose, content, POSE_EMBEDDING_VERSION)
     if estimate is None:
         return PoseEstimateResponse(face_found=False, reason="No face detected")
 
@@ -439,6 +451,35 @@ async def estimate_pose_of_frame(
 # ── Search ───────────────────────────────────────────────────────
 
 
+async def _embed_query(content: bytes, version: int) -> tuple[Optional[PoseEmbedding], bool]:
+    """
+    Embed a search frame under one version, whatever its pose (the caller
+    decides). Returns (result, failed): result None means no face, or an
+    engine failure when ``failed``.
+    """
+    try:
+        return await run_inference(embed_with_pose, content, False, version, False), False
+    except Exception as exc:  # noqa: BLE001 — engine failure, reported as ERROR
+        logger.error("Pose embedding (version %d) failed: %s", version, exc)
+        return None, True
+
+
+def _merge_matches(per_version: dict[int, list[dict]], limit: int) -> list[dict]:
+    """
+    One entry per person across versions, ranked by distance relative to its
+    version's threshold (as ``/search`` ranks across versions). A person with
+    poses of both versions keeps the better match.
+    """
+    best: dict[int, tuple[float, dict]] = {}
+    for version, group in per_version.items():
+        threshold = match_threshold_for_version(version)
+        for match in group:
+            score = match["distance"] / threshold
+            if match["id"] not in best or score < best[match["id"]][0]:
+                best[match["id"]] = (score, match)
+    return [m for _, m in sorted(best.values(), key=lambda pair: pair[0])][:limit]
+
+
 @router.post("/search", response_model=PoseSearchResponse)
 async def search_with_poses(
     file: UploadFile = File(..., description="CCTV frame or photo (JPEG/PNG, ≤ 5 MB)"),
@@ -459,48 +500,76 @@ async def search_with_poses(
     Statuses: ``MATCH`` | ``NO_MATCH`` | ``LOW_QUALITY`` (face turned beyond
     the pose limits — not searched) | ``ERROR``. Every search is audited and a
     MATCH raises an alert, as with ``/search``.
+
+    The frame is embedded under POSE_EMBEDDING_VERSION and under every other
+    version that has poses for the tenant; each is compared only with poses of
+    its own version. The query pose, the pose limits and the query hash come
+    from POSE_EMBEDDING_VERSION (another version's when it finds no face), and
+    ``matchThreshold`` is that version's threshold.
     """
     content, err = await _validate_file(file)
     if err:
         raise HTTPException(status_code=400, detail=err)
 
-    threshold = match_threshold_for_version(INSIGHTFACE_EMBEDDING_VERSION)
+    threshold = match_threshold_for_version(POSE_EMBEDDING_VERSION)
     query_pose: Optional[PoseInfo] = None
     matches: list[dict] = []
+    query_hash = compute_query_hash(b"")
 
     with face_dump("pose_search", content):
-        try:
-            result = await run_inference(embed_with_pose, content)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Pose embedding failed: %s", exc)
-            result, status, error = None, "ERROR", "Embedding extraction failed"
-        else:
-            if result is None:
-                status, error = "ERROR", "No face detected"
-            elif not result.accepted:
-                status, error = "LOW_QUALITY", result.rejected_reason
-            else:
-                status, error = None, None
+        present = {v for v in await get_present_pose_versions(session, tenant_id=tenant_id)
+                   if v in POSE_EMBEDDING_VERSIONS}
+        # The configured version first: it decides the pose and the hash.
+        versions = [POSE_EMBEDDING_VERSION, *sorted(present - {POSE_EMBEDDING_VERSION}, reverse=True)]
+        outcomes = dict(zip(versions, await asyncio.gather(*(_embed_query(content, v) for v in versions))))
+        found = {v: result for v, (result, _) in outcomes.items() if result is not None}
+        lead = next((found[v] for v in versions if v in found), None)
 
-        if result is not None:
-            query_pose = _pose_info(result)
+        if lead is None:
+            engine_failed = any(f for _, f in outcomes.values())
+            status, error = "ERROR", "Embedding extraction failed" if engine_failed else "No face detected"
+        elif not lead.accepted:
+            status, error = "LOW_QUALITY", lead.rejected_reason
+        else:
+            status, error = None, None
+
+        if lead is not None:
+            query_pose = _pose_info(lead)
 
         if status is None:
-            query_hash = compute_query_hash(result.embedding.tobytes())
-            matches = await pose_ann_query(
-                session, result.embedding, threshold=threshold, limit=limit, tenant_id=tenant_id
-            )
-            status = "MATCH" if matches else "NO_MATCH"
-        else:
-            query_hash = compute_query_hash(b"")
+            query_hash = compute_query_hash(lead.embedding.tobytes())
+            # Sequential: one AsyncSession must not run statements concurrently.
+            per_version = {
+                v: await pose_ann_query(
+                    session, found[v].embedding, threshold=match_threshold_for_version(v),
+                    limit=limit, tenant_id=tenant_id, embedding_version=v,
+                )
+                for v in versions if v in found
+            }
+            matches = _merge_matches(per_version, limit)
+            if matches:
+                status = "MATCH"
+            elif present - found.keys():
+                # Poses of a version that found no face were never compared.
+                status, error = "ERROR", "Embedding extraction failed"
+            else:
+                status = "NO_MATCH"
         dump_note("result", {
             "status": status, "error": error, "threshold": threshold,
+            "versions": {v: ("compared" if v in found else "no face or failed") for v in versions},
             "matches": [{"face_id": m["id"], "distance": m["distance"]} for m in matches],
         })
-        if settings.debug_face_dump and result is not None and result.accepted:
+        if settings.debug_face_dump and lead is not None and lead.accepted:
             # Nearest profiles ignoring the threshold, to see how far a miss was.
-            nearest = await pose_ann_query(session, result.embedding, threshold=2.0, limit=5, tenant_id=tenant_id)
-            dump_note("nearest_ignoring_threshold", [{"face_id": m["id"], "distance": m["distance"]} for m in nearest])
+            nearest = [
+                {"version": v, "face_id": m["id"], "distance": m["distance"]}
+                for v in found
+                for m in await pose_ann_query(
+                    session, found[v].embedding, threshold=2.0, limit=5,
+                    tenant_id=tenant_id, embedding_version=v,
+                )
+            ]
+            dump_note("nearest_ignoring_threshold", nearest)
 
     best = matches[0] if matches else None
     audit_id = await add_audit_entry(

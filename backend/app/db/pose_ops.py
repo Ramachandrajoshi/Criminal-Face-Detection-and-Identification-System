@@ -6,7 +6,9 @@ Search compares a query against all of them in one SQL statement and keeps
 each person's closest pose, so a CCTV frame at a three-quarter angle matches
 the person's three-quarter enrollment rather than their frontal mugshot.
 
-All pose embeddings are InsightFace (embedding version 4).
+Every pose embedding carries the ``embedding_version`` it was made with (4 or
+5, see ``POSE_EMBEDDING_VERSIONS``) and is only compared with queries embedded
+under the same version.
 """
 
 from typing import Optional
@@ -14,7 +16,6 @@ from typing import Optional
 import numpy as np
 from sqlalchemy import text
 
-from app.core.config import INSIGHTFACE_EMBEDDING_VERSION
 from app.core.crypto import encrypt_embedding_vector
 from app.core.pose import HeadPose
 
@@ -24,7 +25,7 @@ def _vec_literal(vector: np.ndarray) -> str:
 
 
 async def _insert_pose(session, face_id: int, embedding: np.ndarray, pose: HeadPose,
-                       quality: float, tenant_id: int) -> int:
+                       quality: float, tenant_id: int, embedding_version: int) -> int:
     vector = np.asarray(embedding, dtype=np.float32)
     result = await session.execute(
         text(
@@ -43,7 +44,7 @@ async def _insert_pose(session, face_id: int, embedding: np.ndarray, pose: HeadP
             "tenant_id": tenant_id,
             "vec": _vec_literal(vector),
             "enc": encrypt_embedding_vector(vector),
-            "embedding_version": INSIGHTFACE_EMBEDDING_VERSION,
+            "embedding_version": embedding_version,
             "pose_bucket": pose.bucket,
             "yaw": round(pose.yaw, 2),
             "pitch": round(pose.pitch, 2),
@@ -62,13 +63,15 @@ async def register_profile_with_poses(
     primary_embedding: np.ndarray,
     poses: list[tuple[np.ndarray, HeadPose, float]],
     tenant_id: int = 1,
+    *,
+    embedding_version: int,
 ) -> tuple[int, list[int]]:
     """
     Create a face profile and its pose embeddings in one transaction.
 
     ``primary_embedding`` (the average of the accepted photos) becomes the profile's own
-    ``face_embedding`` as an InsightFace (version 4) vector, so the profile is
-    also visible to the standard ``/search`` endpoint.
+    ``face_embedding``, so the profile is also visible to the standard
+    ``/search`` endpoint. It and the poses are stored as ``embedding_version``.
 
     Returns (profile_id, pose_ids).
     """
@@ -93,12 +96,12 @@ async def register_profile_with_poses(
                 "vec": _vec_literal(vector),
                 "enc": encrypt_embedding_vector(vector),
                 "tenant_id": tenant_id,
-                "embedding_version": INSIGHTFACE_EMBEDDING_VERSION,
+                "embedding_version": embedding_version,
             },
         )
         profile_id = int(result.scalar_one())
         pose_ids = [
-            await _insert_pose(session, profile_id, emb, pose, quality, tenant_id)
+            await _insert_pose(session, profile_id, emb, pose, quality, tenant_id, embedding_version)
             for emb, pose, quality in poses
         ]
         await session.commit()
@@ -114,12 +117,15 @@ async def add_poses(
     poses: list[tuple[np.ndarray, HeadPose, float]],
     tenant_id: int = 1,
     max_poses: Optional[int] = None,
+    *,
+    embedding_version: int,
 ) -> tuple[list[int], list[int]]:
     """
-    Attach pose embeddings to an existing profile in one transaction.
+    Attach pose embeddings, made with ``embedding_version``, to an existing
+    profile in one transaction. The profile may hold poses of another version.
 
     With ``max_poses``, the profile's oldest poses are then deleted so it
-    keeps at most that many, the new ones included.
+    keeps at most that many, the new ones included, whatever their version.
 
     Returns (new pose ids, deleted pose ids).
     """
@@ -139,7 +145,7 @@ async def add_poses(
                 params,
             )
         pose_ids = [
-            await _insert_pose(session, face_id, emb, pose, quality, tenant_id)
+            await _insert_pose(session, face_id, emb, pose, quality, tenant_id, embedding_version)
             for emb, pose, quality in poses
         ]
         deleted: list[int] = []
@@ -174,14 +180,17 @@ async def replace_poses(
     primary_embedding: np.ndarray,
     poses: list[tuple[np.ndarray, HeadPose, float]],
     tenant_id: int = 1,
+    *,
+    embedding_version: int,
 ) -> Optional[list[int]]:
     """
     Re-enrol an existing profile from a new set of poses in one transaction.
 
-    The profile's old pose embeddings are deleted and ``poses`` stored in
-    their place. ``primary_embedding`` replaces the profile's own
-    ``face_embedding`` as a version 4 vector, as for a new profile in
-    ``register_profile_with_poses``. Name, alias and demographics are kept.
+    The profile's old pose embeddings, of any version, are deleted and
+    ``poses`` stored in their place. ``primary_embedding`` replaces the
+    profile's own ``face_embedding``, as for a new profile in
+    ``register_profile_with_poses``; all of them are stored as
+    ``embedding_version``. Name, alias and demographics are kept.
 
     Returns the new pose ids, or None when the profile does not exist (nothing
     is changed).
@@ -206,7 +215,7 @@ async def replace_poses(
                 "tenant_id": tenant_id,
                 "vec": _vec_literal(vector),
                 "enc": encrypt_embedding_vector(vector),
-                "embedding_version": INSIGHTFACE_EMBEDDING_VERSION,
+                "embedding_version": embedding_version,
             },
         )
         if result.fetchone() is None:
@@ -222,7 +231,7 @@ async def replace_poses(
             {"face_id": face_id, "tenant_id": tenant_id},
         )
         pose_ids = [
-            await _insert_pose(session, face_id, emb, pose, quality, tenant_id)
+            await _insert_pose(session, face_id, emb, pose, quality, tenant_id, embedding_version)
             for emb, pose, quality in poses
         ]
         await session.commit()
@@ -284,19 +293,39 @@ async def delete_pose(session, face_id: int, pose_id: int, tenant_id: int = 1) -
     return row is not None
 
 
+async def get_present_pose_versions(session, tenant_id: int = 1) -> set[int]:
+    """
+    The ``embedding_version`` values that have pose embeddings for this
+    tenant, so a search embeds the query only under versions that can match.
+    """
+    result = await session.execute(
+        text(
+            """
+            SELECT DISTINCT embedding_version
+            FROM face_pose_embeddings
+            WHERE tenant_id = :tenant_id
+            """
+        ),
+        {"tenant_id": tenant_id},
+    )
+    return {int(row[0]) for row in result if row[0] is not None}
+
+
 async def pose_ann_query(
     session,
     query_vector: np.ndarray,
     threshold: float,
     limit: int = 10,
     tenant_id: int = 1,
+    *,
+    embedding_version: int,
 ) -> list[dict]:
     """
     Closest pose per person, ranked by cosine distance — one SQL statement.
 
     ``DISTINCT ON (face_id)`` keeps each person's best-matching pose, so a
     person enrolled at five angles appears once, scored by the angle nearest
-    the query.
+    the query. Only poses of ``embedding_version`` (the query's) are compared.
     """
     result = await session.execute(
         text(
@@ -327,7 +356,7 @@ async def pose_ann_query(
             "threshold": threshold,
             "limit": limit,
             "tenant_id": tenant_id,
-            "embedding_version": INSIGHTFACE_EMBEDDING_VERSION,
+            "embedding_version": embedding_version,
         },
     )
     return [
