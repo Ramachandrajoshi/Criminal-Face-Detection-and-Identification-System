@@ -9,8 +9,10 @@ Stage 5 — VERIFY   : pgvector cosine ANN query
 
 Embedding versions 1–3 run stages 1–4 through DeepFace (``detect_face`` +
 ``extract_embedding``). Version 4 runs them through the InsightFace ONNX
-engine (``embed_with_insightface``, see app/core/face_engine.py). Stage 5 is
-shared: each version is queried against its own vectors.
+engine (``embed_with_insightface``, see app/core/face_engine.py) and version 5
+through the YOLOv5-Face + AdaFace ONNX engine (``embed_with_adaface``, see
+app/core/adaface_engine.py). Stage 5 is shared: each version is queried
+against its own vectors.
 
 Liveness / Anti-spoofing policy
 ---------------------------------
@@ -36,6 +38,7 @@ import numpy as np
 from fastapi import UploadFile
 
 from app.core.config import (
+    ADAFACE_EMBEDDING_VERSION,
     CURRENT_EMBEDDING_VERSION,
     DEEPFACE_EMBEDDING_VERSIONS,
     INSIGHTFACE_EMBEDDING_VERSION,
@@ -410,9 +413,28 @@ def embed_with_insightface(image_bytes: bytes, enrollment: bool = False) -> Opti
     Engine failures (missing weights, ONNX Runtime errors) raise — callers
     treat those as an embedding failure rather than "no face".
     """
-    import cv2
-
     from app.core.face_engine import get_engine
+
+    return _embed_with_onnx_engine(image_bytes, get_engine, enrollment, "InsightFace", "v4", "scrfd")
+
+
+# ---------- Stages 1-4 for version 5: YOLOv5-Face + AdaFace ----------
+def embed_with_adaface(image_bytes: bytes, enrollment: bool = False) -> Optional[np.ndarray]:
+    """
+    Version 5: ``embed_with_insightface`` with the YOLOv5-Face + AdaFace engine
+    (weights licensed for commercial use, see app/core/adaface_engine.py).
+    Same face choice, same return values, same failure behaviour.
+    """
+    from app.core.adaface_engine import get_engine
+
+    return _embed_with_onnx_engine(image_bytes, get_engine, enrollment, "AdaFace", "v5", "yolov5face")
+
+
+def _embed_with_onnx_engine(
+    image_bytes: bytes, get_engine, enrollment: bool, name: str, tag: str, detector: str
+) -> Optional[np.ndarray]:
+    """Stages 1–4 on an ``InsightFaceEngine``-like engine; ``tag`` prefixes the debug dumps."""
+    import cv2
 
     frame = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     if frame is None:
@@ -422,17 +444,17 @@ def embed_with_insightface(image_bytes: bytes, enrollment: bool = False) -> Opti
     engine = get_engine()
     best, route = engine.detect_primary(frame, prefer_center=enrollment)
     if best is None:
-        logger.debug("InsightFace: no face above det threshold")
-        dump_note("insightface_detect", "no face above det threshold")
+        logger.debug("%s: no face above det threshold", name)
+        dump_note(f"{name.lower()}_detect", "no face above det threshold")
         return None
 
-    logger.debug("InsightFace: face score=%.2f area=%.0f pass=%s", best.score, best.area, route)
+    logger.debug("%s: face score=%.2f area=%.0f pass=%s", name, best.score, best.area, route)
     dump_detection(
-        "v4_01_detect", frame, best.bbox, best.landmarks,
-        label=f"scrfd {best.score:.2f}", score=best.score, detect_pass=route,
+        f"{tag}_01_detect", frame, best.bbox, best.landmarks,
+        label=f"{detector} {best.score:.2f}", score=best.score, detect_pass=route,
     )
     aligned = engine.align(frame, best.landmarks)
-    dump_stage("v4_02_aligned_112", aligned)
+    dump_stage(f"{tag}_02_aligned_112", aligned)
     return engine.embed(aligned)
 
 
@@ -448,9 +470,10 @@ async def _embed_versions(content: bytes, versions: list[int], enrollment: bool 
     Embed ``content`` under each requested version.
 
     Returns {version: embedding | None | _NO_FACE}. DeepFace versions share one
-    detection pass; InsightFace runs its own detector. Both engines run
-    concurrently on the inference pool. ``enrollment`` only changes which face
-    InsightFace picks when there are several.
+    detection pass; the ONNX engines (versions 4 and 5) each run their own
+    detector. All engines run concurrently on the inference pool.
+    ``enrollment`` only changes which face the ONNX engines pick when there
+    are several.
     """
     deepface_versions = [v for v in versions if v in DEEPFACE_EMBEDDING_VERSIONS]
 
@@ -467,18 +490,22 @@ async def _embed_versions(content: bytes, versions: list[int], enrollment: bool 
         )
         return dict(zip(deepface_versions, embeddings))
 
-    async def run_insightface() -> dict:
-        if INSIGHTFACE_EMBEDDING_VERSION not in versions:
+    async def run_onnx(version: int, embed, name: str) -> dict:
+        if version not in versions:
             return {}
         try:
-            embedding = await run_inference(embed_with_insightface, content, enrollment)
+            embedding = await run_inference(embed, content, enrollment)
         except Exception as exc:  # noqa: BLE001 — engine failure, not "no face"
-            logger.error("InsightFace embedding failed: %s", exc)
-            return {INSIGHTFACE_EMBEDDING_VERSION: None}
-        return {INSIGHTFACE_EMBEDDING_VERSION: _NO_FACE if embedding is None else embedding}
+            logger.error("%s embedding failed: %s", name, exc)
+            return {version: None}
+        return {version: _NO_FACE if embedding is None else embedding}
 
-    deepface_result, insightface_result = await asyncio.gather(run_deepface(), run_insightface())
-    return {**deepface_result, **insightface_result}
+    results = await asyncio.gather(
+        run_deepface(),
+        run_onnx(INSIGHTFACE_EMBEDDING_VERSION, embed_with_insightface, "InsightFace"),
+        run_onnx(ADAFACE_EMBEDDING_VERSION, embed_with_adaface, "AdaFace"),
+    )
+    return {k: v for result in results for k, v in result.items()}
 
 
 async def _embed_for_enrollment(content: bytes) -> tuple[Optional[np.ndarray], Optional[str]]:

@@ -411,6 +411,7 @@ async def test_present_embedding_versions_defaults_to_tenant_one():
 def test_supported_embedding_versions_are_consistent():
     """Search relies on newest-first ordering and on every version having an engine."""
     from app.core.config import (
+        ADAFACE_EMBEDDING_VERSION,
         CURRENT_EMBEDDING_VERSION,
         DEEPFACE_EMBEDDING_VERSIONS,
         INSIGHTFACE_EMBEDDING_VERSION,
@@ -420,10 +421,12 @@ def test_supported_embedding_versions_are_consistent():
     assert CURRENT_EMBEDDING_VERSION in SUPPORTED_EMBEDDING_VERSIONS
     # Newest first, no duplicates — search relies on this ordering.
     assert list(SUPPORTED_EMBEDDING_VERSIONS) == sorted(set(SUPPORTED_EMBEDDING_VERSIONS), reverse=True)
-    assert set(SUPPORTED_EMBEDDING_VERSIONS) == {*DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION}
+    assert set(SUPPORTED_EMBEDDING_VERSIONS) == {
+        *DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION, ADAFACE_EMBEDDING_VERSION,
+    }
 
 
-@pytest.mark.parametrize("value,ok", [("3", True), ("4", True), ("9", False)])
+@pytest.mark.parametrize("value,ok", [("3", True), ("4", True), ("5", True), ("9", False)])
 def test_embedding_version_env_is_validated(value, ok):
     """An unknown EMBEDDING_VERSION must fail at startup, not at enrolment."""
     import os
@@ -447,6 +450,7 @@ def test_match_threshold_is_per_model():
     for version in (1, 2, 3):
         assert match_threshold_for_version(version) == settings.match_threshold
     assert match_threshold_for_version(4) == settings.match_threshold_insightface
+    assert match_threshold_for_version(5) == settings.match_threshold_adaface
 
 
 async def test_ann_query_defaults_to_the_target_versions_threshold():
@@ -462,7 +466,7 @@ async def test_ann_query_defaults_to_the_target_versions_threshold():
 def test_every_deepface_recipe_is_reproducible():
     """Each listed DeepFace recipe must have a working branch in the preprocessor."""
     import numpy as np
-    from app.core.config import DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION
+    from app.core.config import ADAFACE_EMBEDDING_VERSION, DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION
     from app.core.pipeline import _preprocess_for_arcface
 
     face = np.full((160, 120, 3), 90, dtype=np.uint8)
@@ -471,7 +475,7 @@ def test_every_deepface_recipe_is_reproducible():
         assert out.shape == (112, 112, 3)
         assert out.dtype == np.uint8
 
-    # The InsightFace version has its own engine and never uses this recipe.
-    for version in (INSIGHTFACE_EMBEDDING_VERSION, 99):
+    # The ONNX versions have their own engines and never use this recipe.
+    for version in (INSIGHTFACE_EMBEDDING_VERSION, ADAFACE_EMBEDDING_VERSION, 99):
         with pytest.raises(ValueError, match="Unsupported embedding version"):
             _preprocess_for_arcface(face.copy(), version=version)

@@ -197,6 +197,7 @@ def _recipe_settings() -> dict:
         "small_crop_min_side", "enable_denoising", "enable_gamma_correction", "enable_clahe",
         "clahe_clip_limit", "enable_unsharp_mask", "unsharp_strength",
         "insightface_det_size", "insightface_det_threshold",
+        "match_threshold_adaface", "adaface_det_threshold",
     )
     return {k: getattr(settings, k) for k in keys}
 

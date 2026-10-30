@@ -1,6 +1,6 @@
 """
-Compare embedding versions (DeepFace ArcFace 1–3 vs InsightFace 4) on a
-labelled face dataset — accuracy, detection rate, latency.
+Compare embedding versions (DeepFace ArcFace 1–3 vs InsightFace 4 vs
+YOLOv5-Face + AdaFace 5) on a labelled face dataset — accuracy, detection rate, latency.
 
 Dataset layout (LFW-style, one folder per person, ≥ 2 images for genuine pairs):
 
@@ -10,7 +10,7 @@ Dataset layout (LFW-style, one folder per person, ≥ 2 images for genuine pairs
 
 Usage (inside the backend container, or any env with requirements installed):
 
-    python scripts/benchmark_engines.py /data/faces --versions 3 4
+    python scripts/benchmark_engines.py /data/faces --versions 3 4 5
     python scripts/benchmark_engines.py /data/faces --probe-transform backlight
     python scripts/benchmark_engines.py /data/lfw --lfw-pairs /data/pairs.txt --probe-transform cctv
 
@@ -26,8 +26,8 @@ Reports, per version:
     protocol behind published "99.8%" figures); the second image of each
     pair goes through --probe-transform
 
-Use the suggested thresholds as input to MATCH_THRESHOLD_INSIGHTFACE only
-after the bias audit (AGENTS.md §8). Impostor FAR below 1 / impostor-pair
+Use the suggested thresholds as input to MATCH_THRESHOLD_INSIGHTFACE /
+MATCH_THRESHOLD_ADAFACE only after the bias audit (AGENTS.md §8). Impostor FAR below 1 / impostor-pair
 count is not measurable — use thousands of identities for a 0.1% estimate.
 
 No images or embeddings are written anywhere; only aggregate numbers.
@@ -52,6 +52,7 @@ os.environ.setdefault("DB_ENCRYPTION_KEY", base64.b64encode(secrets.token_bytes(
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import (  # noqa: E402
+    ADAFACE_EMBEDDING_VERSION,
     DEEPFACE_EMBEDDING_VERSIONS,
     INSIGHTFACE_EMBEDDING_VERSION,
     SUPPORTED_EMBEDDING_VERSIONS,
@@ -122,6 +123,8 @@ def make_embedder(version: int, enrollment: bool = False):
 
     if version == INSIGHTFACE_EMBEDDING_VERSION:
         return lambda image_bytes: pipeline.embed_with_insightface(image_bytes, enrollment)
+    if version == ADAFACE_EMBEDDING_VERSION:
+        return lambda image_bytes: pipeline.embed_with_adaface(image_bytes, enrollment)
 
     def deepface_embed(image_bytes: bytes):
         aligned = pipeline.detect_face(image_bytes)
@@ -322,7 +325,7 @@ def main() -> None:
               "probe_transform": args.probe_transform, "versions": {}}
 
     for version in args.versions:
-        engine = "insightface" if version == INSIGHTFACE_EMBEDDING_VERSION else "deepface"
+        engine = {INSIGHTFACE_EMBEDDING_VERSION: "insightface", ADAFACE_EMBEDDING_VERSION: "adaface"}.get(version, "deepface")
         print(f"\n── version {version} ({engine}) ──")
         rng = np.random.default_rng(args.seed)
         threshold = match_threshold_for_version(version)
@@ -344,6 +347,9 @@ def main() -> None:
         }
         if version == INSIGHTFACE_EMBEDDING_VERSION:
             from app.core.face_engine import get_engine
+            result["providers"] = get_engine().providers
+        elif version == ADAFACE_EMBEDDING_VERSION:
+            from app.core.adaface_engine import get_engine
             result["providers"] = get_engine().providers
         if args.lfw_pairs:
             result["lfw_pairs"] = lfw_pair_metrics(

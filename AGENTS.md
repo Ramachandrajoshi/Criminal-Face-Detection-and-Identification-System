@@ -54,6 +54,7 @@ project-root/
 │   │   ├── core/
 │   │   │   ├── pipeline.py    ← deepface wrapper (detect→align→normalize→represent→verify)
 │   │   │   ├── face_engine.py ← InsightFace ONNX engine (embedding version 4)
+│   │   │   ├── adaface_engine.py ← YOLOv5-Face + AdaFace ONNX engine (embedding version 5)
 │   │   │   ├── liveness.py    ← anti-spoofing module
 │   │   │   └── config.py      ← env-driven settings (thresholds, model names)
 │   │   ├── db/
@@ -142,8 +143,8 @@ Match threshold `T = 0.58` (cosine). This value lives in `backend/app/core/confi
 as `MATCH_THRESHOLD` and must **never** be hard-coded elsewhere.
 
 Each embedding model has its own distance scale, so embedding version 4 (InsightFace)
-uses `MATCH_THRESHOLD_INSIGHTFACE` instead. Resolve thresholds only through
-`match_threshold_for_version()` in `config.py`.
+uses `MATCH_THRESHOLD_INSIGHTFACE` and version 5 (AdaFace) `MATCH_THRESHOLD_ADAFACE`
+instead. Resolve thresholds only through `match_threshold_for_version()` in `config.py`.
 
 ---
 
@@ -200,10 +201,13 @@ No other backbone may be introduced without a PR updating this file.
 | VGG-Face                        | 4096           | Softmax / Cross-Entropy         | Benchmark comparison only (high-quality frontal) |
 | SFace                           | 512            | Sigmoid-Constrained Hypersphere | Low-resolution CCTV benchmark                    |
 | InsightFace `buffalo_l` (ArcFace R50, WebFace600K) + SCRFD-10G | 512 | Additive Angular Margin | Embedding version 4 (opt-in via `EMBEDDING_VERSION=4`): faster, template-aligned matching. **Weights are non-commercial research use only.** |
+| AdaFace IR-101 (WebFace12M) + YOLOv5-Face M | 512 | Adaptive (quality-aware) margin | Embedding version 5 (opt-in via `EMBEDDING_VERSION=5`): version 4's pipeline with weights licensed for commercial use — AdaFace MIT (github.com/mk-minchul/AdaFace), YOLOv5-Face GPL-3.0 (github.com/deepcam-cn/yolov5-face), downloaded at run time. The training sets (WebFace12M, WIDER FACE) are research-only; take legal advice before commercial use. |
 
 Detector backends in priority order: `retinaface` → `mtcnn` → `opencv`
 (DeepFace, embedding versions 1–3). Version 4 uses SCRFD-10G from the same
-`buffalo_l` pack.
+`buffalo_l` pack; version 5 uses YOLOv5-Face M (ONNX, fixed 640 input; a larger pass runs as
+overlapping 640 px tiles).
+The `/api/v1/pose/*` endpoints always use version 4.
 
 ### Embedding versions
 
@@ -216,6 +220,7 @@ they keep matching until re-enrolled under the new version.
 | ------- | ------ | ----- |
 | 1–3 | DeepFace ArcFace + `_preprocess_for_arcface` recipe | Default (`EMBEDDING_VERSION=3`) |
 | 4 | InsightFace ONNX (`face_engine.py`) | Own threshold `MATCH_THRESHOLD_INSIGHTFACE`; calibrate with `scripts/benchmark_engines.py` + bias audit (§8). Face choice, no-face fallbacks and the second detection of sideways or upside-down faces (on a copy turned upright) live in `detect_primary`; a single-face photo found by the standard pass with the face within 45° of upright embeds exactly as at release |
+| 5 | YOLOv5-Face + AdaFace ONNX (`adaface_engine.py`) | Version 4's `detect_primary` and alignment with commercial-use weights. Own threshold `MATCH_THRESHOLD_ADAFACE` (0.60, calibrated 2026-10-30 on `backend/testdata`: LFW, CCTV-style LFW, phone selfies). Chosen over RetinaFace ResNet-34/50 by `testdata/scripts/candidate_eval.py` |
 
 Changing how an existing version produces embeddings is forbidden — add a new version.
 
@@ -225,8 +230,9 @@ The active model and detector are set via environment variables:
 DEEPFACE_MODEL=ArcFace
 DEEPFACE_DETECTOR=retinaface
 MATCH_THRESHOLD=0.58
-EMBEDDING_VERSION=3              # 4 = InsightFace for new enrollments
+EMBEDDING_VERSION=3              # 4 = InsightFace, 5 = YOLOv5-Face + AdaFace for new enrollments
 MATCH_THRESHOLD_INSIGHTFACE=0.60 # provisional; version 4 only
+MATCH_THRESHOLD_ADAFACE=0.60     # version 5 only
 ```
 
 ---
@@ -385,6 +391,10 @@ MATCH_THRESHOLD_INSIGHTFACE=0.60
 INSIGHTFACE_MODEL_DIR=~/.insightface/models/buffalo_l
 INSIGHTFACE_AUTO_DOWNLOAD=true
 INSIGHTFACE_GPU_MEM_LIMIT_MB=1536
+MATCH_THRESHOLD_ADAFACE=0.60
+ADAFACE_MODEL_DIR=~/.insightface/models/adaface_v5
+ADAFACE_AUTO_DOWNLOAD=true
+ADAFACE_DET_THRESHOLD=0.5
 
 # Database
 POSTGRES_HOST=localhost
@@ -568,4 +578,4 @@ any of these, the agent must stop and flag for human review.
 
 ---
 
-*Last updated: 2026-10-21*
+*Last updated: 2026-10-30*

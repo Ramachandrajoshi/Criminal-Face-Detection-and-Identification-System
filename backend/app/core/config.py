@@ -15,14 +15,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #
 #   1–3 — DeepFace ArcFace + the ``_preprocess_for_arcface`` recipes
 #   4   — InsightFace buffalo_l on ONNX Runtime (app/core/face_engine.py)
+#   5   — YOLOv5-Face + AdaFace on ONNX Runtime (app/core/adaface_engine.py),
+#         weights licensed for commercial use
 #
 # Adding a DeepFace recipe means: add a branch in ``_preprocess_for_arcface``
 # and list it in both tuples below.
-SUPPORTED_EMBEDDING_VERSIONS = (4, 3, 2, 1)
+SUPPORTED_EMBEDDING_VERSIONS = (5, 4, 3, 2, 1)
 DEEPFACE_EMBEDDING_VERSIONS = (3, 2, 1)
 INSIGHTFACE_EMBEDDING_VERSION = 4
+ADAFACE_EMBEDDING_VERSION = 5
 
-assert set(SUPPORTED_EMBEDDING_VERSIONS) == {*DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION}
+assert set(SUPPORTED_EMBEDDING_VERSIONS) == {
+    *DEEPFACE_EMBEDDING_VERSIONS, INSIGHTFACE_EMBEDDING_VERSION, ADAFACE_EMBEDDING_VERSION,
+}
 
 
 class Settings(BaseSettings):
@@ -42,6 +47,7 @@ class Settings(BaseSettings):
     # switching this never invalidates already-registered faces.
     #   3 — DeepFace ArcFace (default)
     #   4 — InsightFace buffalo_l (research licence; see face_engine.py)
+    #   5 — YOLOv5-Face + AdaFace (commercial-use weights; see adaface_engine.py)
     embedding_version: int = 3
 
     # --- InsightFace (embedding version 4) ---
@@ -57,8 +63,23 @@ class Settings(BaseSettings):
     # SCRFD input size (square) and minimum face score.
     insightface_det_size: int = 640
     insightface_det_threshold: float = 0.5
-    # Upper bound on the ONNX Runtime CUDA memory arena.
+    # Upper bound on each ONNX Runtime session's CUDA memory arena
+    # (the detector and recogniser of versions 4 and 5 each have one).
     insightface_gpu_mem_limit_mb: int = 1536
+
+    # --- AdaFace (embedding version 5) ---
+    # Cosine-distance match threshold for version-5 vectors (own model, own
+    # distance scale). Calibrated 2026-10-30 on the backend/testdata scans
+    # (LFW, CCTV-style LFW, phone selfies): at 0.60 it finds as many or more
+    # people than version 4 at 0.60 with no stranger alarm on the selfies.
+    match_threshold_adaface: float = 0.60
+    # Kept under ~/.insightface so the Docker volume for version 4's models
+    # (insightface_models) persists these downloads too.
+    adaface_model_dir: str = "~/.insightface/models/adaface_v5"
+    # Download the pinned YOLOv5-Face + AdaFace files on first use if missing.
+    adaface_auto_download: bool = True
+    # Minimum YOLOv5-Face score (its input size is fixed at 640 by the model).
+    adaface_det_threshold: float = 0.5
 
     # --- Pose-aware enrollment & search (/api/v1/pose/*) ---
     # Always InsightFace (version 4), independent of EMBEDDING_VERSION.
@@ -138,7 +159,7 @@ class Settings(BaseSettings):
     # Set false when the image's TensorFlow cannot run on the card — TF 2.16
     # (CUDA 12.3 / cuDNN 8.9) fails on RTX 50-series / Blackwell GPUs (compute
     # capability 12.0) with CUDA_ERROR_INVALID_HANDLE. DeepFace then runs on
-    # CPU while ONNX Runtime (InsightFace: version 4 and /pose) keeps the GPU.
+    # CPU while ONNX Runtime (versions 4 and 5, and /pose) keeps the GPU.
     tf_enable_gpu: bool = True
     # Hard VRAM cap for TensorFlow (DeepFace models), in MB. 0 = no cap
     # (memory growth). The InsightFace engine is capped separately by
@@ -184,4 +205,6 @@ def match_threshold_for_version(version: int) -> float:
     """Cosine-distance threshold for vectors of the given embedding version."""
     if version == INSIGHTFACE_EMBEDDING_VERSION:
         return settings.match_threshold_insightface
+    if version == ADAFACE_EMBEDDING_VERSION:
+        return settings.match_threshold_adaface
     return settings.match_threshold

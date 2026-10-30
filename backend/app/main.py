@@ -10,7 +10,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import CURRENT_EMBEDDING_VERSION, INSIGHTFACE_EMBEDDING_VERSION, settings
+from app.core.config import (
+    ADAFACE_EMBEDDING_VERSION,
+    CURRENT_EMBEDDING_VERSION,
+    INSIGHTFACE_EMBEDDING_VERSION,
+    settings,
+)
 from app.core.inference_executor import get_executor
 from app.core.middleware import AuthMiddleware
 from app.db.migrations.runner import run_migrations
@@ -148,11 +153,18 @@ def _warmup_models() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Detector warm-up failed (%s) — will load lazily on first request", exc)
 
-    if CURRENT_EMBEDDING_VERSION == INSIGHTFACE_EMBEDDING_VERSION:
+    onnx_engines = {
+        INSIGHTFACE_EMBEDDING_VERSION: ("InsightFace", "app.core.face_engine"),
+        ADAFACE_EMBEDDING_VERSION: ("AdaFace", "app.core.adaface_engine"),
+    }
+    if CURRENT_EMBEDDING_VERSION in onnx_engines:
+        name, module = onnx_engines[CURRENT_EMBEDDING_VERSION]
         try:
+            import importlib
+
             import numpy as np
 
-            from app.core.face_engine import get_engine
+            get_engine = importlib.import_module(module).get_engine
 
             # Loads (and on first run downloads) the ONNX models pre-traffic.
             engine_start = time.perf_counter()
@@ -166,11 +178,11 @@ def _warmup_models() -> None:
             engine.detect(np.zeros((engine.det_size, engine.det_size, 3), dtype=np.uint8), size=2 * engine.det_size)
             engine.embed(np.zeros((112, 112, 3), dtype=np.uint8))
             logger.info(
-                "Warmed InsightFace engine in %.0fms (providers=%s)",
-                (time.perf_counter() - engine_start) * 1000, engine.providers,
+                "Warmed %s engine in %.0fms (providers=%s)",
+                name, (time.perf_counter() - engine_start) * 1000, engine.providers,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("InsightFace warm-up failed (%s) — will load lazily on first request", exc)
+            logger.warning("%s warm-up failed (%s) — will load lazily on first request", name, exc)
 
     logger.info("Model warm-up finished in %.0fms", (time.perf_counter() - start) * 1000)
 

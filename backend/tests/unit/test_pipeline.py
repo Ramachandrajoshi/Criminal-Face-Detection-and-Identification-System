@@ -1433,6 +1433,147 @@ class TestMixedVersionSearch:
 
 
 # ──────────────────────────────────────────────
+# Embedding version 5 (YOLOv5-Face + AdaFace) alongside 4 and 1–3
+# ──────────────────────────────────────────────
+
+class TestEmbedWithAdaface:
+    def test_embeds_the_primary_face_with_the_adaface_engine(self):
+        from app.core.face_engine import DetectedFace
+        from app.core.pipeline import embed_with_adaface
+
+        face = DetectedFace(np.array([0, 0, 40, 40.0]), 0.95, np.full((5, 2), 2.0))
+        engine = TestEmbedWithInsightface()._engine(face)
+
+        with patch("app.core.adaface_engine.get_engine", return_value=engine), \
+             patch("app.core.face_engine.get_engine") as v4_engine:
+            emb = embed_with_adaface(_real_jpeg_bytes(), enrollment=True)
+
+        assert emb.shape == (512,)
+        assert engine.detect_primary.call_args.kwargs["prefer_center"] is True
+        np.testing.assert_array_equal(engine.align.call_args.args[1], face.landmarks)
+        v4_engine.assert_not_called()
+
+    def test_no_face_returns_none(self):
+        from app.core.pipeline import embed_with_adaface
+
+        with patch("app.core.adaface_engine.get_engine", return_value=TestEmbedWithInsightface()._engine(None)):
+            assert embed_with_adaface(_real_jpeg_bytes()) is None
+
+    def test_debug_dump_stages_are_tagged_v5(self):
+        from app.core.face_engine import DetectedFace
+        from app.core.pipeline import embed_with_adaface
+
+        face = DetectedFace(np.array([0, 0, 40, 40.0]), 0.95, np.full((5, 2), 2.0))
+        with patch("app.core.adaface_engine.get_engine", return_value=TestEmbedWithInsightface()._engine(face)), \
+             patch("app.core.pipeline.dump_detection") as detection, \
+             patch("app.core.pipeline.dump_stage") as stage:
+            embed_with_adaface(_real_jpeg_bytes())
+
+        assert detection.call_args.args[0] == "v5_01_detect"
+        assert detection.call_args.kwargs["label"] == "yolov5face 0.95"
+        assert stage.call_args.args[0] == "v5_02_aligned_112"
+
+
+def _v5_current():
+    return patch("app.core.pipeline.CURRENT_EMBEDDING_VERSION", 5)
+
+
+class TestVersion5:
+    """EMBEDDING_VERSION=5 enrols through AdaFace; v4 and v3 faces keep matching."""
+
+    async def test_register_uses_adaface(self, mock_embedding):
+        from app.core.pipeline import register_pipeline
+
+        with _v5_current(), \
+             patch("app.core.pipeline.embed_with_adaface", return_value=mock_embedding) as adaface, \
+             patch("app.core.pipeline.embed_with_insightface") as insight, \
+             patch("app.core.pipeline.detect_face") as deepface_detect, \
+             patch("app.db.vector_ops.register_profile", AsyncMock(return_value=7)) as reg, \
+             patch("app.db.vector_ops.add_audit_entry", AsyncMock(return_value=1)):
+            result = await register_pipeline(make_test_image(), AsyncMock(), "Name")
+
+        assert result["status"] == "REGISTERED"
+        adaface.assert_called_once()
+        assert adaface.call_args.args[1] is True     # enrollment picks the centred face
+        insight.assert_not_called()
+        deepface_detect.assert_not_called()
+        np.testing.assert_array_equal(reg.await_args.args[4], mock_embedding)
+
+    def _patches(self, present, adaface=None):
+        adaface = np.full(512, 5, np.float32) if adaface is None else adaface
+        return (
+            _mock_present_versions(present),
+            patch("app.core.pipeline.detect_face", return_value=np.zeros((112, 112, 3))),
+            patch("app.core.pipeline.extract_embedding",
+                  side_effect=lambda face, version: np.full(512, version, dtype=np.float32)),
+            patch("app.core.pipeline.embed_with_insightface", return_value=np.full(512, 4, np.float32)),
+            patch("app.core.pipeline.embed_with_adaface",
+                  side_effect=adaface if isinstance(adaface, Exception) else None,
+                  return_value=None if isinstance(adaface, Exception) else adaface),
+        )
+
+    async def test_every_present_version_is_queried_with_its_own_embedding_and_threshold(self):
+        from app.core.config import settings
+        from app.core.pipeline import run_pipeline
+
+        p = self._patches({5, 4, 3})
+        with _v5_current(), p[0], p[1], p[2], p[3], p[4], \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])) as vm:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "NO_MATCH"
+        calls = {c.kwargs["target_version"]: c for c in vm.await_args_list}
+        assert {v: c.kwargs["threshold"] for v, c in calls.items()} == {
+            5: settings.match_threshold_adaface,
+            4: settings.match_threshold_insightface,
+            3: settings.match_threshold,
+        }
+        for v, c in calls.items():
+            assert c.args[0][0] == v                 # each recipe's own query vector
+
+    async def test_v4_faces_still_match_after_switching_to_v5(self):
+        from app.core.pipeline import run_pipeline
+
+        async def verify(embedding, session, **kwargs):
+            return [{"id": 40, "distance": 0.3, "embedding_version": 4}] if kwargs["target_version"] == 4 else []
+
+        p = self._patches({4})
+        with _v5_current(), p[0], p[1], p[2], p[3], p[4] as adaface, \
+             patch("app.core.pipeline.verify_match", side_effect=verify) as vm:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "MATCH"
+        assert result["matches"][0]["id"] == 40
+        # v5 is embedded for the audit hash even with nothing enrolled under it.
+        adaface.assert_called_once()
+        assert [c.kwargs["target_version"] for c in vm.await_args_list] == [4]
+
+    async def test_adaface_engine_failure_keeps_other_results(self):
+        from app.core.pipeline import run_pipeline
+
+        async def verify(embedding, session, **kwargs):
+            return [{"id": 40, "distance": 0.3}]
+
+        p = self._patches({5, 4}, adaface=RuntimeError("onnx failed"))
+        with _v5_current(), p[0], p[1], p[2], p[3], p[4], \
+             patch("app.core.pipeline.verify_match", side_effect=verify) as vm:
+            result = await run_pipeline(make_test_image(), AsyncMock())
+
+        assert result["status"] == "MATCH"
+        assert [c.kwargs["target_version"] for c in vm.await_args_list] == [4]
+
+    async def test_v4_deployment_never_loads_adaface(self):
+        from app.core.pipeline import run_pipeline
+
+        p = self._patches({4, 3})
+        with _v4_current(), p[0], p[1], p[2], p[3], p[4] as adaface, \
+             patch("app.core.pipeline.verify_match", AsyncMock(return_value=[])):
+            await run_pipeline(make_test_image(), AsyncMock())
+
+        adaface.assert_not_called()
+
+
+# ──────────────────────────────────────────────
 # GPU memory configuration (TensorFlow)
 # ──────────────────────────────────────────────
 

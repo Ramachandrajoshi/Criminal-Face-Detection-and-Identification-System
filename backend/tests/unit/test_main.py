@@ -60,6 +60,19 @@ class TestWarmup:
         assert engine.detect.call_args_list[0].args[0].shape == (640, 640, 3)
         assert engine.embed.call_args.args[0].shape == (112, 112, 3)
 
+    def test_version_5_warms_the_adaface_engine_only(self):
+        engine = MagicMock(det_size=640, providers=["CPUExecutionProvider"])
+        with patch.dict(sys.modules, {"deepface": _deepface()}), \
+             patch("app.core.pipeline.detect_face"), \
+             patch("app.main.CURRENT_EMBEDDING_VERSION", main.ADAFACE_EMBEDDING_VERSION), \
+             patch("app.core.adaface_engine.get_engine", return_value=engine), \
+             patch("app.core.face_engine.get_engine") as v4_engine:
+            main._warmup_models()
+
+        assert [c.kwargs.get("size") for c in engine.detect.call_args_list] == [None, 1280]
+        assert engine.embed.call_args.args[0].shape == (112, 112, 3)
+        v4_engine.assert_not_called()
+
     def test_failures_are_logged_never_raised(self):
         failing = _deepface(build_model=MagicMock(side_effect=OSError("weights missing")))
         with patch.dict(sys.modules, {"deepface": failing}), \
