@@ -759,6 +759,19 @@ test(pipeline): add unit test for SPOOF_BLOCKED path
 
 This project is licensed under the [MIT License](LICENSE).
 
+The licence covers this repository's code. The face models are not part of it: their
+weights are downloaded at run time and come with their own terms.
+
+| Weights | Used by | Licence |
+|---|---|---|
+| YOLOv5-Face M ([deepcam-cn/yolov5-face](https://github.com/deepcam-cn/yolov5-face)) | embedding version 5 | GPL-3.0 |
+| AdaFace IR-101 ([mk-minchul/AdaFace](https://github.com/mk-minchul/AdaFace)) | embedding version 5 | MIT |
+| InsightFace `buffalo_l` (SCRFD + ArcFace) | embedding version 4 | non-commercial research only |
+| DeepFace ArcFace + RetinaFace ([serengil/deepface_models](https://github.com/serengil/deepface_models)) | embedding versions 1–3 | inherited from the original models (DeepFace: ArcFace from leondgarse/Keras_insightface, RetinaFace from InsightFace) |
+
+The datasets these models were trained on (WIDER FACE, WebFace, MS-Celeb) are released for
+non-commercial research. Check the terms that apply to your deployment before commercial use.
+
 ---
 
 ## Support

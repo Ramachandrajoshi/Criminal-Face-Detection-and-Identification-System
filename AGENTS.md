@@ -39,6 +39,7 @@ act on a match without a human-in-the-loop confirmation step.
 ```
 project-root/
 ├── AGENTS.md                  ← this file
+├── LICENSE                    ← MIT, the code only (model weights: README "License")
 ├── docker-compose.yml
 ├── .env.example
 │
